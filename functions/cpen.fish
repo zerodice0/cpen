@@ -9,12 +9,14 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         echo "  에이전트는 -a > \$CPEN_AGENT > 대화형 선택 순으로 결정된다."
         echo
         echo "  -a, --agent <codex|claude>   사용할 에이전트"
-        echo "      --install-hooks          동시 편집 차단 훅을 설치한다"
+        echo "      --install-hooks          동시 편집 차단 훅과 포커스 훅을 설치한다"
         echo "      --uninstall-hooks        설치한 훅을 제거한다"
         echo "  -h, --help                   이 도움말"
         echo
         echo "  세션 이름을 생략하면 pen:<파일명> 이 쓰인다."
         echo "  set -Ux CPEN_AGENT claude    로 기본 에이전트를 고정한다."
+        echo "  set -Ux CPEN_FOCUS never     로 턴 종료 포커스를 끈다 (auto|always|never)."
+        echo "  cpen-focus                   로 대상 파일을 직접 앞으로 가져온다."
         return 0
     end
 
@@ -146,18 +148,23 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         "작업 대상 .pen 파일: $pen_file" \
         "Pencil MCP 도구를 호출할 때 filePath 에는 항상 위 절대 경로를 넘기세요." \
         "다른 .pen 파일은 읽지도 수정하지도 마세요." \
+        "수정한 결과를 사용자가 지금 봐야 할 때는 'fish -c cpen-focus' 로 Pen.app 을 앞으로 가져오세요. 턴이 끝나면 자동으로 올라오므로 습관적으로 부를 필요는 없습니다." \
         "활성 캔버스(get_app_state)는 Pen.app 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요." \
         ".pen 파일은 Pencil MCP로만 읽고 수정하세요." \
         "다른 세션이 점유한 .pen 을 건드리면 PreToolUse 훅이 호출을 차단합니다. 차단되면 재시도하거나 우회하지 말고 사용자에게 보고하세요."
 
-    # 훅은 이 세 변수로 판정한다. 에이전트를 env 로 감싸 자식 프로세스(훅 포함)까지
-    # 상속시킨다. CPEN_LEASE_DIR 을 굳이 넘기는 건, 사용자가 set -U(비-export)로
-    # 지정했을 때 훅이 다른 디렉토리를 보는 사고를 막기 위해서다.
+    # 훅은 이 변수들로 판정한다. 에이전트를 env 로 감싸 자식 프로세스(훅 포함)까지
+    # 상속시킨다. CPEN_LEASE_DIR 과 CPEN_FOCUS 를 굳이 넘기는 건, 사용자가
+    # set -U(비-export)로 지정했을 때 훅이 다른 값을 보는 사고를 막기 위해서다.
+    set -l focus $CPEN_FOCUS
+    test -n "$focus"; or set focus auto
+
     set -l penv \
         CPEN_PEN_FILE=$pen_file \
         CPEN_SESSION=$session_label \
         CPEN_LEASE_TOKEN=$token \
-        CPEN_LEASE_DIR=(_cpen_lease dir)
+        CPEN_LEASE_DIR=(_cpen_lease dir) \
+        CPEN_FOCUS=$focus
 
     switch $agent
         case codex

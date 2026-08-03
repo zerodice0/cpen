@@ -50,6 +50,7 @@ function cpen-guard --description "PreToolUse 훅 본체: .pen 을 건드리는 
         # 리스가 없다 - cpen 을 거치지 않았거나 resume 으로 되살린 세션이다.
         # 여기서 대신 잡아 준다. 이후 다른 세션은 이 파일에서 막힌다.
         _cpen_guard_claim "$abs"
+        _cpen_guard_mark "$abs" $parsed[1]
         return 0
     end
 
@@ -63,9 +64,11 @@ function cpen-guard --description "PreToolUse 훅 본체: .pen 을 건드리는 
     # 토큰만 보면 cpen 밖 세션이 자기 리스에 막히고, pid 만 보면 토큰을 넘겨받은
     # 서브에이전트 호출을 놓친다. 둘 다 본다.
     if test -n "$CPEN_LEASE_TOKEN"; and test "$owner_token" = "$CPEN_LEASE_TOKEN"
+        _cpen_guard_mark "$abs" $parsed[1]
         return 0
     end
     if contains -- $owner_pid (_cpen_guard_ancestors)
+        _cpen_guard_mark "$abs" $parsed[1]
         return 0
     end
 
@@ -108,6 +111,17 @@ print("%s\t%s" % (d.get("tool_name") or "", fp or ""))
     # 필드 수 판정은 호출부에서 하므로 여기서는 status 를 삼킨다.
     string split \t -- $line[1]
     return 0
+end
+
+function _cpen_guard_mark --description "수정 도구였다면 리스에 표시를 남긴다" -a abs tool
+    # Stop 훅(cpen-focus)이 이 표시를 보고 Pen.app 을 앞으로 올릴지 정한다.
+    # 표시가 없는 턴은 파일을 건드리지 않은 턴이므로 창을 뺏지 않는다.
+    #
+    # Pencil MCP 에서 문서를 바꾸는 도구는 execute 하나다. 표기는 에이전트마다
+    # 다르지만(claude 는 mcp__pencil__execute, codex 는 pencil/execute) 끝은 늘
+    # execute 다. 조회 도구를 잘못 집어도 손해는 포커스 한 번이라 느슨하게 본다.
+    string match -qr '(^|[_/.])execute$' -- "$tool"; or return 0
+    _cpen_lease mark "$abs"
 end
 
 function _cpen_guard_ancestors --description "훅 프로세스의 조상 pid 목록"

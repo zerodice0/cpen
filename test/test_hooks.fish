@@ -72,6 +72,90 @@ else
     fail "중복 설치" "cpen-guard 항목 $n 개"
 end
 
+# 포커스 훅은 Stop 에 붙고, 남의 Stop 훅을 앞지르지 않는다.
+python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+groups = doc["hooks"]["Stop"]
+cmds = [h["command"] for g in groups for h in g["hooks"]]
+assert sum(1 for c in cmds if "cpen-focus" in c) == 1, cmds
+assert "cpen-focus" in cmds[-1], cmds
+assert "matcher" not in groups[-1], groups[-1]
+' $TMP/.codex/hooks.json
+expect_status "포커스 훅이 Stop 맨 뒤에 하나만 붙는다" 0 $status
+
+# 포커스 훅은 Stop 이라 모든 세션에서 매 턴 불린다. cpen 밖 세션에서는 sh 단계에서
+# 끝나고 fish 조차 뜨지 않아야 한다 - 설정에 적힌 명령을 그대로 실행해 확인한다.
+set -l focus_cmd (python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+cmds = [h["command"] for g in doc["hooks"]["Stop"] for h in g["hooks"]]
+print(next(c for c in cmds if "cpen-focus" in c))
+' $TMP/.codex/hooks.json)
+
+mkdir -p $TMP/fakebin
+printf '%s\n' '#!/bin/sh' "echo called >>$TMP/fish.log" >$TMP/fakebin/fish
+chmod +x $TMP/fakebin/fish
+set -l fakepath $TMP/fakebin:(string join : $PATH)
+
+rm -f $TMP/fish.log
+env -u CPEN_PEN_FILE PATH=$fakepath sh -c "$focus_cmd"
+expect_status "cpen 밖 세션에서도 exit 0" 0 $status
+if test -f $TMP/fish.log
+    fail "cpen 밖 세션에서 fish 가 떴다"
+else
+    ok "cpen 밖 세션에서는 fish 조차 띄우지 않는다"
+end
+
+# 경로에 공백이 있어도 판정이 깨지지 않아야 한다.
+env "CPEN_PEN_FILE=$TMP/a b/c.pen" PATH=$fakepath sh -c "$focus_cmd"
+expect_status "cpen 세션에서도 exit 0" 0 $status
+if test -f $TMP/fish.log
+    ok "cpen 세션에서는 포커스 훅이 실행된다"
+else
+    fail "cpen 세션에서 훅이 실행되지 않았다"
+end
+
+# 명령이 낡으면 재설치가 자리에서 갱신해야 한다(uninstall/install 왕복 없이).
+python3 -c '
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path))
+for g in doc["hooks"]["Stop"]:
+    for h in g["hooks"]:
+        if "cpen-focus" in h["command"]:
+            h["command"] = "fish -c cpen-focus-OLD"
+json.dump(doc, open(path, "w"))
+' $TMP/.codex/hooks.json
+_cpen_hooks install >/dev/null 2>&1
+python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+cmds = [h["command"] for g in doc["hooks"]["Stop"] for h in g["hooks"]]
+focus = [c for c in cmds if "cpen-focus" in c]
+assert len(focus) == 1, focus
+assert "OLD" not in focus[0], focus
+assert "CPEN_PEN_FILE" in focus[0], focus
+' $TMP/.codex/hooks.json
+expect_status "낡은 훅 명령은 재설치가 갱신한다" 0 $status
+
+# 가드만 있고 포커스가 없는 구버전 설치본도 재설치로 메워져야 한다.
+python3 -c '
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path))
+doc["hooks"].pop("Stop")
+json.dump(doc, open(path, "w"))
+' $TMP/.claude/settings.json
+_cpen_hooks install >/dev/null 2>&1
+python3 -c '
+import json, sys
+doc = json.load(open(sys.argv[1]))
+cmds = [h["command"] for g in doc["hooks"]["Stop"] for h in g["hooks"]]
+assert any("cpen-focus" in c for c in cmds), cmds
+' $TMP/.claude/settings.json
+expect_status "가드만 설치된 상태에서 포커스만 채워 넣는다" 0 $status
+
 # 기존 훅이 살아있어야 한다.
 python3 -c '
 import json, sys

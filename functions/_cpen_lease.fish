@@ -21,6 +21,12 @@ function _cpen_lease --description "cpen 리스(파일 점유권) 관리: acquir
         case list
             # 살아있는 리스 전부 TSV 로 출력
             _cpen_lease_list
+        case mark
+            # mark <abs-path>  - 이 파일을 방금 수정했다고 표시
+            _cpen_lease_mark $argv
+        case unmark
+            # unmark <abs-path>  - 표시를 소비한다: 있었으면 0, 없었으면 1
+            _cpen_lease_unmark $argv
         case reap
             # 죽은 리스 정리
             _cpen_lease_reap
@@ -119,6 +125,21 @@ function _cpen_lease_list --description "살아있는 리스 전부 출력"
     for cell in $dir/*.d
         _cpen_lease_alive $cell; and cat $cell/info
     end
+end
+
+function _cpen_lease_mark --description "이 .pen 을 수정했다고 표시"
+    # 표시를 리스 셀 안에 두는 이유: 파일별로 저절로 갈리고, 세션이 끝나 리스가
+    # 사라질 때 표시도 함께 사라진다. 따로 만료를 관리할 필요가 없다.
+    # 리스가 없으면 표시할 곳도 없다 - 실패로 알리고 만다(포커스가 한 번 없을 뿐).
+    set -l cell (_cpen_lease_dir)/(_cpen_lease_key $argv[1]).d
+    test -d $cell; or return 1
+    touch $cell/touched
+end
+
+function _cpen_lease_unmark --description "표시를 소비한다: 있었으면 0, 없었으면 1"
+    set -l cell (_cpen_lease_dir)/(_cpen_lease_key $argv[1]).d
+    test -f $cell/touched; or return 1
+    rm -f $cell/touched
 end
 
 function _cpen_lease_reap --description "죽은 리스 정리"
