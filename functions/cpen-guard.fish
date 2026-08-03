@@ -51,8 +51,6 @@ function cpen-guard --description "PreToolUse 훅 본체: .pen 을 건드리는 
         set -l owner_token $fields[5]
 
         if _cpen_guard_mine $owner_pid $owner_token
-            # Stop 훅(cpen-focus)이 이 표시를 보고 Pen.app 을 앞으로 올릴지 정한다.
-            _cpen_lease mark "$abs"
             return 0
         end
 
@@ -77,8 +75,6 @@ Pencil 은 같은 파일에 대한 동시 편집을 직렬화하지 않습니다
     #    은 프롬프트 계약이 맡는다. 훅이 강제하는 것은 동시 편집 방지뿐이다.
     if test -z "$CPEN_PEN_FILE"; or test "$abs" = (path resolve "$CPEN_PEN_FILE")
         _cpen_guard_claim "$abs"
-        # Stop 훅(cpen-focus)이 이 표시를 보고 Pen.app 을 앞으로 올릴지 정한다.
-        _cpen_lease mark "$abs"
     end
 
     # 표시나 claim 이 실패해도 호출은 통과시킨다. 여기서 non-zero 를 내면

@@ -132,35 +132,6 @@ else
     set -g FAILED (math $FAILED + 1)
 end
 
-echo "-- 수정 표시 --"
-# 통과한 호출 중 문서를 바꾸는 것만 표시를 남겨야 한다.
-# 그 표시가 Stop 훅(cpen-focus)의 판단 근거다.
-set -gx CPEN_LEASE_TOKEN tok-Z
-
-function marked -a label expected name
-    # 표시를 지우고 -> 호출하고 -> 다시 지워 그 사이에 생겼는지 본다.
-    # unmark 는 표시가 있었으면 0 이므로 그 status 가 곧 판정이다.
-    _cpen_lease unmark $TMP/design/a.pen
-    cpen-guard <$TMP/json/$name.json >/dev/null 2>&1
-    set -l had 0
-    _cpen_lease unmark $TMP/design/a.pen; and set had 1
-    if test $had -eq $expected
-        echo "  ok   $label"
-    else
-        echo "  FAIL $label (표시=$had, 기대=$expected)"
-        set -g FAILED (math $FAILED + 1)
-    end
-end
-
-marked "execute 는 표시를 남긴다 (claude 표기)" 1 claude_a
-marked "execute 는 표시를 남긴다 (codex 표기)" 1 codex_a
-marked "조회 도구는 표시를 남기지 않는다" 0 shot_a
-
-# 차단된 호출은 파일을 바꾸지 못했으므로 표시도 없어야 한다.
-# 토큰을 지우면 tok-Z 리스가 남의 것으로 보여 같은 호출이 차단된다.
-set -e CPEN_LEASE_TOKEN
-marked "차단된 호출은 표시를 남기지 않는다" 0 claude_a
-
 kill $live 2>/dev/null
 rm -rf $TMP
 
