@@ -23,6 +23,7 @@ function cpen-guard --description "PreToolUse 훅 본체: .pen 을 건드리는 
     set -l parsed (_cpen_guard_parse "$payload")
     test (count $parsed) -ge 2; or return 0
 
+    set -l tool $parsed[1]
     set -l file $parsed[2]
 
     string match -q '*.pen' -- "$file"; or return 0
@@ -31,48 +32,31 @@ function cpen-guard --description "PreToolUse 훅 본체: .pen 을 건드리는 
     # 그래도 상대 경로가 올 수 있으니 정규화해서 리스 키를 맞춘다.
     set -l abs (path resolve "$file")
 
-    # 1) cpen 이 이 세션에 배정한 파일인가.
-    #    프롬프트로만 부탁하던 "다른 .pen 은 건드리지 마세요" 를 여기서 강제한다.
-    if test -n "$CPEN_PEN_FILE"; and test "$abs" != (path resolve "$CPEN_PEN_FILE")
-        _cpen_guard_deny "이 세션에 배정된 .pen 파일이 아닙니다.
-
-  요청한 파일: $abs
-  배정된 파일: $CPEN_PEN_FILE
-
-같은 요청을 다시 시도하지 마세요. 배정된 파일로 작업하거나, 다른 파일이 필요하면
-사용자에게 별도 cpen 세션을 띄워 달라고 요청하세요."
-        return 2
+    # 1) 읽기는 어떤 .pen 이든 통과시킨다.
+    #    .pen 은 다른 파일을 imports 로 끌어다 variables(디자인 토큰)를 공유한다.
+    #    참조 대상을 읽지 못하면 토큰 일원화 자체가 불가능하므로, 읽기를 막는 것은
+    #    동시 편집 방지와 무관한 순수한 손해다. 읽기는 무엇도 덮어쓰지 않는다.
+    if _cpen_guard_readonly "$tool"
+        return 0
     end
 
-    # 2) 이 파일의 리스를 누가 들고 있는가.
+    # 2) 여기부터는 파일을 바꿀 수 있는 호출이다. 리스 주인이 따로 있으면 막는다 -
+    #    훅이 책임지는 규칙은 이 하나, 동시 편집 방지다.
     set -l info (_cpen_lease owner "$abs")
-    if test $status -ne 0
-        # 리스가 없다 - cpen 을 거치지 않았거나 resume 으로 되살린 세션이다.
-        # 여기서 대신 잡아 준다. 이후 다른 세션은 이 파일에서 막힌다.
-        _cpen_guard_claim "$abs"
-        _cpen_guard_mark "$abs" $parsed[1]
-        return 0
-    end
+    if test $status -eq 0
+        set -l fields (string split \t -- $info)
+        set -l owner_pid $fields[2]
+        set -l owner_agent $fields[3]
+        set -l owner_session $fields[4]
+        set -l owner_token $fields[5]
 
-    set -l fields (string split \t -- $info)
-    set -l owner_pid $fields[2]
-    set -l owner_agent $fields[3]
-    set -l owner_session $fields[4]
-    set -l owner_token $fields[5]
+        if _cpen_guard_mine $owner_pid $owner_token
+            # Stop 훅(cpen-focus)이 이 표시를 보고 Pen.app 을 앞으로 올릴지 정한다.
+            _cpen_lease mark "$abs"
+            return 0
+        end
 
-    # 내 리스인가: cpen 이 넘겨준 토큰이 같거나, 리스 주인이 내 조상 프로세스이거나.
-    # 토큰만 보면 cpen 밖 세션이 자기 리스에 막히고, pid 만 보면 토큰을 넘겨받은
-    # 서브에이전트 호출을 놓친다. 둘 다 본다.
-    if test -n "$CPEN_LEASE_TOKEN"; and test "$owner_token" = "$CPEN_LEASE_TOKEN"
-        _cpen_guard_mark "$abs" $parsed[1]
-        return 0
-    end
-    if contains -- $owner_pid (_cpen_guard_ancestors)
-        _cpen_guard_mark "$abs" $parsed[1]
-        return 0
-    end
-
-    _cpen_guard_deny "이 .pen 파일은 다른 에이전트 세션이 작업 중입니다.
+        _cpen_guard_deny "이 .pen 파일은 다른 에이전트 세션이 작업 중입니다.
 
   파일: $abs
   점유: $owner_agent (pid $owner_pid) / 세션 \"$owner_session\"
@@ -80,9 +64,48 @@ function cpen-guard --description "PreToolUse 훅 본체: .pen 을 건드리는 
 Pencil 은 같은 파일에 대한 동시 편집을 직렬화하지 않습니다. 그대로 진행하면
 서로의 변경이 덮이거나 undo 스택이 뒤섞입니다.
 
+읽기는 막히지 않으므로 참고가 목적이라면 조회 도구를 쓰세요. 수정이 목적이라면
 같은 요청을 다시 시도하지 말고, 우회 경로($file 를 다른 도구로 열기 등)도 찾지 마세요.
 사용자에게 위 세션이 점유 중이라고 보고하고, 끝날 때까지 기다릴지 물어보세요."
-    return 2
+        return 2
+    end
+
+    # 3) 리스가 없는 파일이다.
+    #    배정 파일이거나 cpen 밖 세션이면 여기서 잡아 이후 다른 세션을 막는다.
+    #    배정 밖 파일은 잡지 않는다 - 토큰 파일처럼 여러 세션이 함께 참조하는 파일을
+    #    스쳐 지나간 세션이 통째로 점유해 버리면 안 된다. 그 대신 "수정은 배정 파일에만"
+    #    은 프롬프트 계약이 맡는다. 훅이 강제하는 것은 동시 편집 방지뿐이다.
+    if test -z "$CPEN_PEN_FILE"; or test "$abs" = (path resolve "$CPEN_PEN_FILE")
+        _cpen_guard_claim "$abs"
+        # Stop 훅(cpen-focus)이 이 표시를 보고 Pen.app 을 앞으로 올릴지 정한다.
+        _cpen_lease mark "$abs"
+    end
+
+    # 표시나 claim 이 실패해도 호출은 통과시킨다. 여기서 non-zero 를 내면
+    # 부가 기능의 실패가 도구 호출 자체를 막는다.
+    return 0
+end
+
+function _cpen_guard_mine --description "이 리스의 주인이 이 세션인가" -a owner_pid owner_token
+    # 토큰만 보면 cpen 밖 세션이 자기 리스에 막히고, pid 만 보면 토큰을 넘겨받은
+    # 서브에이전트 호출을 놓친다. 둘 다 본다.
+    if test -n "$CPEN_LEASE_TOKEN"; and test "$owner_token" = "$CPEN_LEASE_TOKEN"
+        return 0
+    end
+    contains -- $owner_pid (_cpen_guard_ancestors)
+end
+
+function _cpen_guard_readonly --description "파일을 바꾸지 않는 Pencil 도구인가" -a tool
+    # 화이트리스트로 두는 이유는 fail-safe 다. Pencil 에 새 도구가 생겼을 때
+    # 모르는 이름을 읽기로 보고 통과시키는 쪽보다, 쓰기로 보고 막는 쪽이 안전하다.
+    #
+    # execute 는 여기 없다. 문서상 input 이 자유 형식 코드라 조회만 하는지
+    # 정적으로 보장할 수 없다 - 실제로 Pencil 은 구조 조회에도 execute 의 Get 을
+    # 권한다. 읽기 겸용이라는 이유로 열어 주면 쓰기가 통째로 열린다.
+    #
+    # 도구 이름 표기는 에이전트마다 다르다(claude 는 mcp__pencil__get_screenshot,
+    # codex 는 pencil/get_screenshot). 그래서 접미사로 맞춘다.
+    string match -qr '(^|[_/.])(get_screenshot|export_nodes|export_html)$' -- "$tool"
 end
 
 function _cpen_guard_parse --description "훅 payload 에서 tool_name 과 filePath 를 뽑는다"
@@ -111,17 +134,6 @@ print("%s\t%s" % (d.get("tool_name") or "", fp or ""))
     # 필드 수 판정은 호출부에서 하므로 여기서는 status 를 삼킨다.
     string split \t -- $line[1]
     return 0
-end
-
-function _cpen_guard_mark --description "수정 도구였다면 리스에 표시를 남긴다" -a abs tool
-    # Stop 훅(cpen-focus)이 이 표시를 보고 Pen.app 을 앞으로 올릴지 정한다.
-    # 표시가 없는 턴은 파일을 건드리지 않은 턴이므로 창을 뺏지 않는다.
-    #
-    # Pencil MCP 에서 문서를 바꾸는 도구는 execute 하나다. 표기는 에이전트마다
-    # 다르지만(claude 는 mcp__pencil__execute, codex 는 pencil/execute) 끝은 늘
-    # execute 다. 조회 도구를 잘못 집어도 손해는 포커스 한 번이라 느슨하게 본다.
-    string match -qr '(^|[_/.])execute$' -- "$tool"; or return 0
-    _cpen_lease mark "$abs"
 end
 
 function _cpen_guard_ancestors --description "훅 프로세스의 조상 pid 목록"

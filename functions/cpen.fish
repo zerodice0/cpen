@@ -147,11 +147,11 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         "Pencil 작업 세션: $session_label" \
         "작업 대상 .pen 파일: $pen_file" \
         "Pencil MCP 도구를 호출할 때 filePath 에는 항상 위 절대 경로를 넘기세요." \
-        "다른 .pen 파일은 읽지도 수정하지도 마세요." \
+        "수정은 위 파일에만 하세요. 다른 .pen 은 참조용으로 읽기만 합니다 - 공통 토큰이나 컴포넌트를 확인할 때는 그 파일을 읽어도 됩니다." \
         "수정한 결과를 사용자가 지금 봐야 할 때는 'fish -c cpen-focus' 로 Pen.app 을 앞으로 가져오세요. 턴이 끝나면 자동으로 올라오므로 습관적으로 부를 필요는 없습니다." \
         "활성 캔버스(get_app_state)는 Pen.app 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요." \
         ".pen 파일은 Pencil MCP로만 읽고 수정하세요." \
-        "다른 세션이 점유한 .pen 을 건드리면 PreToolUse 훅이 호출을 차단합니다. 차단되면 재시도하거나 우회하지 말고 사용자에게 보고하세요."
+        "다른 세션이 작업 중인 .pen 을 수정하려 하면 PreToolUse 훅이 차단합니다(읽기는 막지 않습니다). 차단되면 재시도하거나 우회하지 말고 사용자에게 보고하세요."
 
     # 훅은 이 변수들로 판정한다. 에이전트를 env 로 감싸 자식 프로세스(훅 포함)까지
     # 상속시킨다. CPEN_LEASE_DIR 과 CPEN_FOCUS 를 굳이 넘기는 건, 사용자가

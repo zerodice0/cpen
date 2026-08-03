@@ -30,6 +30,10 @@ fixture claude_a "{\"tool_name\":\"mcp__pencil__execute\",\"tool_input\":{\"file
 fixture claude_b "{\"tool_name\":\"mcp__pencil__execute\",\"tool_input\":{\"filePath\":\"$TMP/design/b.pen\",\"input\":\"x\"}}"
 fixture codex_a "{\"tool_name\":\"pencil/execute\",\"tool_input\":{\"filePath\":\"$TMP/design/a.pen\",\"input\":\"x\"}}"
 fixture shot_a "{\"tool_name\":\"pencil__get_screenshot\",\"tool_input\":{\"filePath\":\"$TMP/design/a.pen\",\"nodeId\":\"document\"}}"
+fixture shot_b "{\"tool_name\":\"mcp__pencil__get_screenshot\",\"tool_input\":{\"filePath\":\"$TMP/design/b.pen\",\"nodeId\":\"document\"}}"
+fixture export_a "{\"tool_name\":\"pencil/export_nodes\",\"tool_input\":{\"filePath\":\"$TMP/design/a.pen\",\"nodeIds\":[\"x\"],\"outputDir\":\"/tmp\"}}"
+# 모르는 도구는 읽기로 넘겨짚지 않고 쓰기로 본다(fail-safe).
+fixture unknown_a "{\"tool_name\":\"mcp__pencil__import_tokens\",\"tool_input\":{\"filePath\":\"$TMP/design/a.pen\"}}"
 
 function chk -a label expected name
     cpen-guard <$TMP/json/$name.json >/dev/null 2>$TMP/err.txt
@@ -48,6 +52,19 @@ function spawn_fake -a name
     echo $last_pid
 end
 
+# 실제 claim 은 조상 체인에서 codex/claude 프로세스를 찾는데, 테스트에서는 fish 가
+# 직접 부르므로 언제나 no-op 이 된다. 호출 자체를 기록해 "어느 파일을 잡으려 했는가" 를 본다.
+function _cpen_guard_claim -a abs
+    printf '%s\n' $abs >>$TMP/claim.log
+end
+
+function claimed -a path
+    # 가드는 정규화한 경로로 claim 한다. macOS 는 /var 가 /private/var 심볼릭 링크라
+    # 정규화하지 않고 비교하면 항상 어긋난다.
+    set -l lines (cat $TMP/claim.log 2>/dev/null)
+    contains -- (path resolve $path) $lines
+end
+
 echo "== 가드 훅 =="
 
 set -l other (spawn_fake codex)
@@ -58,18 +75,38 @@ chk "filePath 없는 get_app_state 는 통과" 0 appstate
 chk "깨진 payload 는 통과" 0 broken
 chk "tool_input 없는 호출은 통과" 0 noinput
 
-echo "-- 배정 파일 강제 --"
+echo "-- 배정 밖 파일 --"
+# .pen 은 imports 로 다른 파일의 토큰을 끌어다 쓴다. 참조 대상을 읽지 못하면
+# 토큰 일원화가 불가능하므로, 배정 밖이라는 이유만으로 막지 않는다.
 set -gx CPEN_PEN_FILE $TMP/design/a.pen
 chk "배정된 파일은 통과" 0 claude_a
-chk "배정 밖 파일은 차단" 2 claude_b
+chk "배정 밖 파일도 읽기는 통과" 0 shot_b
+chk "배정 밖 파일 수정은 아무도 안 잡고 있으면 통과" 0 claude_b
+
+# 배정 밖 파일은 리스를 잡지 않는다 - 스쳐 간 세션이 공용 토큰 파일을 점유하면 안 된다.
+if claimed $TMP/design/a.pen
+    echo "  ok   배정 파일은 리스를 잡는다"
+else
+    echo "  FAIL 배정 파일을 잡지 않았다"
+    set -g FAILED (math $FAILED + 1)
+end
+if claimed $TMP/design/b.pen
+    echo "  FAIL 배정 밖 파일을 점유했다"
+    set -g FAILED (math $FAILED + 1)
+else
+    echo "  ok   배정 밖 파일은 리스를 잡지 않는다"
+end
+rm -f $TMP/claim.log
 set -e CPEN_PEN_FILE
 rm -rf $CPEN_LEASE_DIR
 
 echo "-- 다른 세션이 점유 중 --"
 _cpen_lease acquire $TMP/design/a.pen codex "pen:a" tok-OTHER $other
-chk "claude 표기로도 차단" 2 claude_a
-chk "codex 표기로도 차단" 2 codex_a
-chk "읽기 도구(get_screenshot)도 차단" 2 shot_a
+chk "claude 표기로도 수정은 차단" 2 claude_a
+chk "codex 표기로도 수정은 차단" 2 codex_a
+chk "읽기 도구(get_screenshot)는 통과" 0 shot_a
+chk "읽기 도구(export_nodes)도 통과" 0 export_a
+chk "모르는 도구는 쓰기로 보고 차단" 2 unknown_a
 chk "점유되지 않은 파일은 통과" 0 claude_b
 
 echo "-- 내 리스 --"
