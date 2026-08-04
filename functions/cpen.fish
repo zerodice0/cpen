@@ -9,8 +9,8 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         echo "  에이전트는 -a > \$CPEN_AGENT > 대화형 선택 순으로 결정된다."
         echo
         echo "  -a, --agent <codex|claude>   사용할 에이전트"
-        echo "      --install-hooks          동시 편집 차단 훅을 설치한다"
-        echo "      --uninstall-hooks        설치한 훅을 제거한다"
+        echo "      --install-hooks          작업 완료 시 .pen 자동 저장 훅을 설치한다"
+        echo "      --uninstall-hooks        cpen 훅을 제거한다"
         echo "  -h, --help                   이 도움말"
         echo
         echo "  세션 이름을 생략하면 pen:<파일명> 이 쓰인다."
@@ -100,14 +100,11 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         set session_label "pen:$stem"
     end
 
-    # 같은 파일을 여러 세션이 잡으면 Pencil 쪽 동시성 보장이 없다.
-    # 다른 파일끼리는 도구가 filePath 로 주소지정하므로 구조적으로 안전하다.
-    #
-    # 리스를 에이전트보다 *먼저* 잡는 이유: 여기가 원자적이지 않으면 cpen 두 개가
-    # 같은 순간에 목록을 보고 둘 다 통과한다(예전 argv 스캔의 TOCTOU).
-    # mkdir 로 잡으므로 경합해도 한쪽만 성공한다.
+    # 리스는 최초 세션을 기록해 파일 목록과 초기 프롬프트에 점유 정보를 보여준다.
+    # 차단 용도가 아니므로 이미 점유 중이어도 확인 질문 없이 세션을 시작한다.
     set -l token (uuidgen)
     set -l holds_lease 1
+    set -l concurrent_prompt
     _cpen_lease acquire $pen_file $agent $session_label $token %self
     switch $status
         case 0
@@ -118,15 +115,13 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         case '*'
             set -l busy (_cpen_busy_label $pen_file (_cpen_occupants))
             set -l name (path basename $pen_file)
-            echo "cpen: $name 을 $busy[2] 가 작업 중입니다." >&2
-            read -l -P "      그래도 진행합니까? [y/N] " reply
-            string match -qir '^y' -- $reply; or return 1
-
-            # 강제로 진행하는 세션은 기존 리스의 토큰을 물려받는다.
-            # 그래야 훅이 "같은 소유자" 로 보고 통과시킨다 - 사용자가 위험을 알고
-            # 고른 길이므로 여기서 또 막지 않는다. 대신 리스 해제는 원 주인에게 맡긴다.
-            set -l info (_cpen_lease owner $pen_file)
-            and set token (string split -f5 \t -- $info)
+            set -l busy_long $busy[2]
+            test -n "$busy_long"; or set busy_long "다른 세션"
+            echo "cpen: $name 을 $busy_long 가 작업 중입니다 - 동시 작업으로 시작합니다." >&2
+            set concurrent_prompt \
+                "현재 같은 파일을 $busy_long 가 작업 중입니다. 필요한 경우 같은 파일에 수정할 수 있지만, 다른 세션의 변경을 덮어쓰거나 되돌리지 마세요." \
+                "수정 직전에 대상 노드를 다시 읽고, 기억한 상태와 다르면 최신 상태를 기준으로 작업하세요." \
+                "한 번의 execute 범위를 작게 유지하고, 충돌이 의심되면 재시도보다 사용자에게 현재 상태를 보고하세요."
             set holds_lease 0
     end
 
@@ -142,36 +137,33 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
 
     # Pencil MCP 의 변경/조회 도구는 모두 filePath 를 받는다. 대상 지정은 그 인자로 하고,
     # get_app_state 의 '활성 캔버스' 는 Pen.app 전역 공유라 판정 근거로 쓰지 않는다.
-    set -l guard \
+    set -l prompt \
         "Pencil 작업 세션: $session_label" \
         "작업 대상 .pen 파일: $pen_file" \
         "Pencil MCP 도구를 호출할 때 filePath 에는 항상 위 절대 경로를 넘기세요." \
-        "수정은 위 파일에만 하세요. 다른 .pen 은 참조용으로 읽기만 합니다 - 공통 토큰이나 컴포넌트를 확인할 때는 그 파일을 읽어도 됩니다." \
+        "수정은 위 파일을 중심으로 하되, 다른 세션도 같은 문서를 변경할 수 있다고 가정하세요." \
         "활성 캔버스(get_app_state)는 Pen.app 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요." \
-        ".pen 파일은 Pencil MCP로만 읽고 수정하세요." \
-        "다른 세션이 작업 중인 .pen 을 수정하려 하면 PreToolUse 훅이 차단합니다(읽기는 막지 않습니다). 차단되면 재시도하거나 우회하지 말고 사용자에게 보고하세요."
+        ".pen 파일은 Pencil MCP로만 읽고 수정하세요."
+    set -a prompt $concurrent_prompt
 
-    # 훅은 이 변수들로 판정한다. 에이전트를 env 로 감싸 자식 프로세스(훅 포함)까지
-    # 상속시킨다.
+    # 작업 경로는 cpen-focus 와 세션 프롬프트가 사용한다.
     set -l penv \
         CPEN_PEN_FILE=$pen_file \
-        CPEN_SESSION=$session_label \
-        CPEN_LEASE_TOKEN=$token \
-        CPEN_LEASE_DIR=(_cpen_lease dir)
+        CPEN_SESSION=$session_label
 
     switch $agent
         case codex
             # codex 에는 세션 이름 플래그가 없고 TUI 가 alt screen 을 쓰므로
             # 셸에서 출력한 안내는 화면 전환에 가려진다. 프롬프트로 전달한다.
-            set -a guard "첫 응답 마지막에 '세션 이름 지정: /rename $session_label' 을 안내하세요."
+            set -a prompt "첫 응답 마지막에 '세션 이름 지정: /rename $session_label' 을 안내하세요."
             # string collect: 명령치환은 개행에서 분할하므로 없으면 한 줄로 뭉개진다
-            env $penv codex -C "$workdir" (string join \n $guard | string collect)
+            env $penv codex -C "$workdir" (string join \n $prompt | string collect)
         case claude
             # claude 는 -C 가 없어 env -C 로 cwd 를 넘긴다(함수 안 cd 는 호출자 셸로 샌다).
             # 세션 이름은 --name 으로 직접 지정되므로 /rename 안내가 필요 없다.
             env -C "$workdir" $penv claude \
                 --name "$session_label" \
-                (string join \n $guard | string collect)
+                (string join \n $prompt | string collect)
     end
     set -l rc $status
 
@@ -182,13 +174,7 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
 end
 
 function _cpen_pick_header --description "파일 선택 화면 헤더"
-    # 훅이 없으면 리스를 남기는 건 cpen 자신뿐이라, 감지 범위가 예전과 같다.
-    # 그 차이를 헤더에서 분명히 해 둔다.
-    if _cpen_hooks status >/dev/null
-        echo "⚠ 는 작업 중인 세션입니다 - 훅이 설치되어 동시 편집은 차단됩니다"
-    else
-        echo "⚠ 는 cpen 으로 띄운 세션만 감지합니다 - cpen --install-hooks 로 차단까지 켜세요"
-    end
+    echo "⚠ 는 다른 세션이 작업 중입니다 - 차단하지 않고 동시 작업 안내를 전달합니다"
 end
 
 function _cpen_occupants --description "점유 중인 세션: 정규경로<TAB>pid<TAB>agent<TAB>세션"
@@ -199,7 +185,7 @@ function _cpen_occupants --description "점유 중인 세션: 정규경로<TAB>p
         set -a seen "$f[1]"\t"$f[2]"
         printf '%s\t%s\t%s\t%s\n' $f[1] $f[2] $f[3] $f[4]
     end
-    # 훅을 설치하지 않은 세션은 리스를 남기지 않으므로 argv 스캔으로 보완한다.
+    # 동시에 들어온 후속 세션은 최초 리스를 공유하지 않으므로 argv 스캔으로 보완한다.
     for line in (_cpen_sessions)
         set -l f (string split \t -- $line)
         set -l abs (path resolve $f[3])

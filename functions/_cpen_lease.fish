@@ -51,10 +51,9 @@ function _cpen_lease_alive --description "리스 디렉토리가 살아있는 �
     # pid 만 보면 재사용된 pid 를 붙잡는다. 프로세스 이름까지 확인해
     # "그 pid 가 여전히 리스를 만든 그 프로세스인지" 를 근거로 삼는다.
     #
-    # fish 도 주인이 될 수 있는 이유: cpen 은 에이전트를 띄우기 *전에* 리스를 잡아야
-    # 두 cpen 이 동시에 들어와도 하나만 통과한다. 그 시점에 존재하는 프로세스는
-    # cpen 을 실행한 셸뿐이고, 그 셸은 에이전트가 끝날 때까지 foreground 로 붙들려 있다.
-    # 훅이 대신 잡은 리스(_cpen_guard_claim)는 주인이 codex/claude 다.
+    # cpen 은 에이전트를 띄우기 전에 점유 표시용 리스를 남기므로 최초 주인은 fish 다.
+    # 그 셸은 에이전트가 끝날 때까지 foreground 로 붙들려 있다. 이전 버전의 훅이 만든
+    # 리스와의 호환을 위해 codex/claude 프로세스도 살아있는 주인으로 인정한다.
     set -l info $argv[1]/info
     test -r $info; or return 1
     set -l fields (string split \t -- (cat $info 2>/dev/null))
