@@ -34,13 +34,15 @@ function cpen-save --description "cpen 대상 .pen 파일 저장"
         return 1
     end
 
-    osascript \
+    set -l save_result (osascript \
         -e 'use framework "Foundation"' \
         -e 'on run argv' \
         -e 'set targetPath to item 1 of argv' \
         -e 'set targetURL to ((current application\'s NSURL\'s fileURLWithPath:targetPath)\'s absoluteString()) as text' \
         -e 'tell application "System Events"' \
         -e 'if not (exists application process "Pen") then error "Pen.app is not running"' \
+        -e 'tell application process "Pen" to set windowNames to name of every window' \
+        -e 'if windowNames does not contain targetURL then return "window-unavailable"' \
         -e 'set previousProcess to first application process whose frontmost is true' \
         -e 'try' \
         -e 'tell application process "Pen"' \
@@ -60,11 +62,14 @@ function cpen-save --description "cpen 대상 .pen 파일 저장"
         -e 'end try' \
         -e 'end tell' \
         -e 'end run' \
-        -- "$pen_file" >/dev/null
-    or return 1
+        -- "$pen_file")
+    set -l save_status $status
+    test $save_status -eq 0; or return 1
 
     if set -q _flag_hook
         echo '{}'
+    else if test "$save_result" = window-unavailable
+        echo "cpen: 저장 건너뜀 - 화면이 잠겼거나 대상 Pen 창이 열려 있지 않습니다 ($pen_file)"
     else
         echo "cpen: 저장 완료 ($pen_file)"
     end
