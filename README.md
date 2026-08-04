@@ -52,6 +52,7 @@ Codex는 새 세션에서 `/hooks`를 열어 새 cpen 훅을 한 번 승인해�
 ```fish
 cpen                          # 에이전트 선택 → 파일 선택
 cpen -a claude                # 에이전트 선택 단계를 건너뛴다
+cpen -a claude -f design/a.pen # 파일 선택 단계도 건너뛴다
 cpen -a claude 이벤트 목록 개편  # 세션 이름까지 지정
 cpen --help
 
@@ -66,6 +67,34 @@ set -Ux CPEN_AGENT claude     # 기본 에이전트 고정 (선택 단계가 사
 
 에이전트는 `-a` > `$CPEN_AGENT` > 대화형 선택 순으로 정해진다.
 세션 이름을 생략하면 `pen:<파일명>` 이 쓰인다.
+
+## Herdr Pencil Session (prototype)
+
+`herdr-plugin.toml` 은 선택한 `.pen` 파일을 하나의 Herdr 탭으로 연다.
+
+- 왼쪽 2/3: 기존 `cpen`으로 시작한 Codex 또는 Claude
+- 오른쪽 1/3: 최상위 Pencil 프레임 이미지와 프레임 선택 목록
+- 파일이 저장되어 mtime이 바뀌면 선택 프레임을 자동 갱신
+- Pen MCP가 2배 PNG를 임시 경로에 export하고, 읽은 즉시 삭제한 뒤 Herdr 그래픽
+  레이어에 전달한다. preview 종료 시 임시 디렉터리도 정리한다.
+
+Herdr 0.7.5 이상과 Kitty graphics를 지원하는 외부 터미널(예: Ghostty)이 필요하다.
+현재 iTerm2에서는 Herdr가 이미지 셀 크기를 얻지 못하므로 우측 이미지가 표시되지 않는다.
+플러그인을 연결하고 Herdr 설정의 `[experimental]`에 `kitty_graphics = true`를 켠다.
+
+```sh
+herdr plugin link /absolute/path/to/cpen
+```
+
+설정된 단축키나 Herdr plugin action에서 `Open Pencil Session`을 실행한 뒤 파일과
+에이전트를 고른다. 우측 미리보기에서는 `j/k` 또는 방향키로 프레임을 바꾸고,
+`r`로 다시 읽으며, `q`로 미리보기를 종료한다. 같은 방식으로 탭을 여러 개 열 수 있다.
+이 시스템의 설정에서는 Ghostty에서 `herdr`를 실행하고 `Ctrl+P`, `p`를 차례로 누른다.
+선택한 문서에 preview agent를 연결하는 동안 Pen이 잠깐 앞으로 오며, 연결과 첫 이미지
+준비가 끝나면 원래 터미널 앱으로 자동 복귀한다.
+
+초기 프로토타입은 기존 `.pen` 선택만 지원한다. 새 문서 생성은 Pen.app에서 저장한 뒤
+선택하는 흐름으로 둔다.
 
 파일 탐색은 **git 루트** 기준이라 하위 디렉토리에서 실행해도 같은 목록이 나오고,
 에이전트도 git 루트에서 시작한다. git 저장소가 아니면 현재 디렉토리를 쓴다.

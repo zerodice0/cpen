@@ -11,6 +11,10 @@ for suite in $here/test_*.fish
     echo
 end
 
+echo "### test_herdr.py"
+PYTHONPYCACHEPREFIX=/tmp/cpen-pycache python3 $here/test_herdr.py; or set failed (math $failed + 1)
+echo
+
 if test $failed -gt 0
     echo "실패한 스위트 $failed 개"
     exit 1

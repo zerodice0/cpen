@@ -1,14 +1,15 @@
 function cpen --description "Select a .pen file and start an agent (codex/claude)"
-    argparse h/help a/agent= install-hooks uninstall-hooks -- $argv
+    argparse h/help a/agent= f/file= install-hooks uninstall-hooks -- $argv
     or return 1
 
     if set -q _flag_help
-        echo "사용법: cpen [-a codex|claude] [세션 이름...]"
+        echo "사용법: cpen [-a codex|claude] [-f FILE] [세션 이름...]"
         echo
         echo "  .pen 파일을 골라 Pen.app 으로 열고 에이전트를 띄운다."
         echo "  에이전트는 -a > \$CPEN_AGENT > 대화형 선택 순으로 결정된다."
         echo
         echo "  -a, --agent <codex|claude>   사용할 에이전트"
+        echo "  -f, --file <FILE>            파일 선택 단계를 건너뛴다"
         echo "      --install-hooks          작업 완료 시 .pen 자동 저장 훅을 설치한다"
         echo "      --uninstall-hooks        cpen 훅을 제거한다"
         echo "  -h, --help                   이 도움말"
@@ -52,47 +53,59 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
     end
 
     # 탐색 기준점을 실행 기준점(git 루트)과 맞춘다.
-    # 맞추지 않으면 하위 디렉토리에서 실행했을 때 목록이 비어 조용히 종료된다.
     set -l workdir (git rev-parse --show-toplevel 2>/dev/null)
     test -n "$workdir"; or set workdir (pwd)
 
-    set -l occupants (_cpen_occupants)
+    set -l pen_file
+    if set -q _flag_file
+        set pen_file (path resolve $_flag_file)
+        if not test -f "$pen_file"
+            echo "cpen: .pen 파일을 찾을 수 없습니다: $pen_file" >&2
+            return 1
+        end
+        if test (path extension "$pen_file") != ".pen"
+            echo "cpen: .pen 파일이 아닙니다: $pen_file" >&2
+            return 1
+        end
+        set -l file_root (git -C (path dirname "$pen_file") rev-parse --show-toplevel 2>/dev/null)
+        test -n "$file_root"; and set workdir $file_root
+    else
+        set -l occupants (_cpen_occupants)
 
-    # 목록은 "정규 경로<TAB>표시문자열" 로 만들고 fzf 에는 표시문자열만 보여준다.
-    # --no-ignore: .pen 을 gitignore 해두는 저장소가 있어 빼면 아예 안 잡힌다.
-    # 대신 재생성 산출물을 배제해 스캔 대상을 줄인다.
-    set -l rows
-    for found in (
-        fd --no-ignore --type f --extension pen \
-            -E build -E .dart_tool -E node_modules -E Pods -E .git -E DerivedData \
-            . "$workdir"
-    )
-        set -l abs (path resolve $found)
-        set -l disp (string replace -- "$workdir/" "" $abs)
-        set -l busy (_cpen_busy_label $abs $occupants)
-        test -n "$busy[1]"; and set disp "$disp  ⚠ 작업 중: $busy[1]"
-        set -a rows "$abs"\t"$disp"
+        # 목록은 "정규 경로<TAB>표시문자열" 로 만들고 fzf 에는 표시문자열만 보여준다.
+        # --no-ignore: .pen 을 gitignore 해두는 저장소가 있어 빼면 아예 안 잡힌다.
+        set -l rows
+        for found in (
+            fd --no-ignore --type f --extension pen \
+                -E build -E .dart_tool -E node_modules -E Pods -E .git -E DerivedData \
+                . "$workdir"
+        )
+            set -l abs (path resolve $found)
+            set -l disp (string replace -- "$workdir/" "" $abs)
+            set -l busy (_cpen_busy_label $abs $occupants)
+            test -n "$busy[1]"; and set disp "$disp  ⚠ 작업 중: $busy[1]"
+            set -a rows "$abs"\t"$disp"
+        end
+
+        if test (count $rows) -eq 0
+            echo "cpen: .pen 파일이 없습니다: $workdir" >&2
+            return 1
+        end
+
+        set -l picked (
+            printf '%s\n' $rows |
+            fzf \
+                --prompt="Pencil file ($agent)> " \
+                --height=40% \
+                --reverse \
+                --delimiter=\t \
+                --with-nth=2.. \
+                --header=(_cpen_pick_header)
+        )
+
+        test (count $picked) -eq 1; or return 1
+        set pen_file (string split -f1 \t -- $picked)
     end
-
-    if test (count $rows) -eq 0
-        echo "cpen: .pen 파일이 없습니다: $workdir" >&2
-        return 1
-    end
-
-    set -l picked (
-        printf '%s\n' $rows |
-        fzf \
-            --prompt="Pencil file ($agent)> " \
-            --height=40% \
-            --reverse \
-            --delimiter=\t \
-            --with-nth=2.. \
-            --header=(_cpen_pick_header)
-    )
-
-    test (count $picked) -eq 1; or return 1
-
-    set -l pen_file (string split -f1 \t -- $picked)
 
     set -l session_label (string join " " $argv)
     if test -z "$session_label"
@@ -125,10 +138,12 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
             set holds_lease 0
     end
 
-    if not open -a Pen "$pen_file"
-        echo "cpen: Pen.app 으로 파일을 열지 못했습니다: $pen_file" >&2
-        test $holds_lease -eq 1; and _cpen_lease release $pen_file $token
-        return 1
+    if not set -q CPEN_SKIP_OPEN
+        if not open -a Pen "$pen_file"
+            echo "cpen: Pen.app 으로 파일을 열지 못했습니다: $pen_file" >&2
+            test $holds_lease -eq 1; and _cpen_lease release $pen_file $token
+            return 1
+        end
     end
 
     # 여기서 Pen 이 열리기를 기다리지 않는다. 에이전트의 첫 MCP 호출까지는 CLI 기동 +

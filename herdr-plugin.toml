@@ -1,0 +1,21 @@
+id = "zerodice0.cpen"
+name = "cpen Pencil Session"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Open a 2:1 agent and live Pencil preview tab."
+platforms = ["macos"]
+
+[[actions]]
+id = "open"
+title = "Open Pencil Session"
+description = "Select a .pen file and agent, then open a preview tab."
+contexts = ["workspace", "pane"]
+command = ["python3", "herdr/cpen_session.py", "open"]
+
+[[panes]]
+id = "launcher"
+title = "Open Pencil Session"
+placement = "popup"
+width = 92
+height = 30
+command = ["python3", "herdr/cpen_session.py", "launcher"]
