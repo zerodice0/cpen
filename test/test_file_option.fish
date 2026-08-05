@@ -64,6 +64,24 @@ else
 end
 set -e CPEN_SKIP_OPEN
 
+function uname
+    echo Linux
+end
+
+function xdg-open
+    printf '%s\n' $argv >$TMP/xdg-open.log
+    return 0
+end
+
+cpen -a codex --file $TMP/repo/design/a.pen Linux >/dev/null
+if grep -Fxq (path resolve $TMP/repo/design/a.pen) $TMP/xdg-open.log
+    echo "  ok   Linux에서는 xdg-open으로 Pencil 파일을 연다"
+else
+    echo "  FAIL Linux Pencil 파일 열기"
+    set -g FAILED (math $FAILED + 1)
+end
+functions -e uname xdg-open
+
 cpen -a codex --file $TMP/repo/design/missing.pen >/dev/null 2>$TMP/error.log
 if test $status -ne 0; and grep -q '찾을 수 없습니다' $TMP/error.log
     echo "  ok   없는 파일은 명확히 거부한다"

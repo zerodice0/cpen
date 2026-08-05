@@ -40,10 +40,52 @@ class HerdrPreviewTests(unittest.TestCase):
 
     def test_pen_open_exit_code_is_not_authoritative(self):
         completed = mock.Mock(returncode=1)
-        with mock.patch.object(MODULE.subprocess, "run", return_value=completed) as run:
-            MODULE.open_pen("/tmp/example.pen")
+        command = ["/usr/bin/open", "-a", "Pen", "/tmp/example.pen"]
+        with mock.patch.object(MODULE, "pen_open_command", return_value=command):
+            with mock.patch.object(
+                MODULE.subprocess, "run", return_value=completed
+            ) as run:
+                MODULE.open_pen("/tmp/example.pen")
         self.assertFalse(run.call_args.kwargs["check"])
         self.assertNotIn("-g", run.call_args.args[0])
+
+    def test_linux_pencil_mcp_uses_installed_architecture(self):
+        home = Path("/home/tester")
+        with mock.patch.dict(MODULE.os.environ, {}, clear=True):
+            self.assertEqual(
+                MODULE.pencil_mcp_path("linux", "x86_64", home),
+                home
+                / ".local/opt/pen/app/resources/app.asar.unpacked/out"
+                / "mcp-server-linux-x64",
+            )
+            self.assertEqual(
+                MODULE.pencil_mcp_path("linux", "aarch64", home).name,
+                "mcp-server-linux-arm64",
+            )
+
+    def test_linux_pen_open_prefers_desktop_launcher(self):
+        with mock.patch.dict(MODULE.os.environ, {}, clear=True):
+            with mock.patch.object(MODULE.shutil, "which") as which:
+                which.side_effect = lambda name: (
+                    "/home/tester/.local/bin/pen-desktop"
+                    if name == "pen-desktop"
+                    else "/usr/bin/xdg-open"
+                )
+                self.assertEqual(
+                    MODULE.pen_open_command("/tmp/example.pen", "linux"),
+                    ["/home/tester/.local/bin/pen-desktop", "/tmp/example.pen"],
+                )
+
+    def test_pencil_mcp_environment_override_wins(self):
+        with mock.patch.dict(
+            MODULE.os.environ,
+            {"CPEN_PENCIL_MCP": "/opt/pencil/custom-mcp"},
+            clear=True,
+        ):
+            self.assertEqual(
+                MODULE.pencil_mcp_path("linux", "x86_64", Path("/home/tester")),
+                Path("/opt/pencil/custom-mcp"),
+            )
 
     def test_wait_for_ready_observes_signal_file(self):
         with tempfile.TemporaryDirectory() as directory:

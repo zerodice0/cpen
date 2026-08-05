@@ -8,6 +8,7 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import platform
 from pathlib import Path
 import queue
 import re
@@ -28,8 +29,8 @@ import uuid
 
 
 PLUGIN_ID = "zerodice0.cpen"
-PLUGIN_VERSION = "0.4.0"
-PEN_MCP = Path(
+PLUGIN_VERSION = "0.5.0"
+MACOS_PEN_MCP = Path(
     "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/"
     "out/mcp-server-darwin-arm64"
 )
@@ -244,6 +245,35 @@ def pencil_mcp_command(binary: Path) -> list[str]:
     return [str(binary), "--app", "desktop", "--agent", agent]
 
 
+def pencil_mcp_path(
+    system: str | None = None,
+    machine: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    override = os.environ.get("CPEN_PENCIL_MCP")
+    if override:
+        return Path(override).expanduser()
+    system = system or sys.platform
+    if system == "darwin":
+        return MACOS_PEN_MCP
+    if system.startswith("linux"):
+        architecture = {
+            "x86_64": "x64",
+            "amd64": "x64",
+            "aarch64": "arm64",
+            "arm64": "arm64",
+        }.get((machine or platform.machine()).lower())
+        if not architecture:
+            raise RuntimeError(f"지원하지 않는 Linux 아키텍처: {machine}")
+        root = home or Path.home()
+        return (
+            root
+            / ".local/opt/pen/app/resources/app.asar.unpacked/out"
+            / f"mcp-server-linux-{architecture}"
+        )
+    raise RuntimeError(f"지원하지 않는 운영체제: {system}")
+
+
 def invocation_values() -> tuple[str, str]:
     data = context()
     cwd = (
@@ -325,10 +355,24 @@ def pen_file_rows(paths: list[str], root: str, exclude_pane: str = "") -> list[s
     return rows
 
 
+def pen_open_command(file_path: str, system: str | None = None) -> list[str]:
+    system = system or sys.platform
+    if system == "darwin":
+        return ["/usr/bin/open", "-a", "Pen", file_path]
+    if system.startswith("linux"):
+        override = os.environ.get("CPEN_PENCIL_APP")
+        opener = override or shutil.which("pen-desktop") or shutil.which("xdg-open")
+        return [opener, file_path] if opener else []
+    return []
+
+
 def open_pen(file_path: str) -> None:
     # The MCP transport binds a new agent to Pen's active document window.
+    command = pen_open_command(file_path)
+    if not command:
+        raise RuntimeError("Pencil 데스크톱 앱을 여는 명령을 찾지 못했습니다")
     subprocess.run(
-        ["/usr/bin/open", "-a", "Pen", file_path],
+        command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
@@ -336,6 +380,8 @@ def open_pen(file_path: str) -> None:
 
 
 def frontmost_bundle_id() -> str:
+    if sys.platform != "darwin":
+        return ""
     result = subprocess.run(
         [
             "osascript",
@@ -351,7 +397,7 @@ def frontmost_bundle_id() -> str:
 
 
 def activate_bundle(bundle_id: str) -> None:
-    if bundle_id:
+    if bundle_id and sys.platform == "darwin":
         subprocess.run(
             ["/usr/bin/open", "-b", bundle_id],
             stdout=subprocess.DEVNULL,
@@ -706,7 +752,7 @@ def launch_session() -> int:
 
 class PencilMCP:
     def __init__(self) -> None:
-        binary = Path(os.environ.get("CPEN_PENCIL_MCP", str(PEN_MCP)))
+        binary = pencil_mcp_path()
         self.process = subprocess.Popen(
             pencil_mcp_command(binary),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,

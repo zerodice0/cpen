@@ -12,12 +12,12 @@ Pencil `.pen` 파일을 골라 Pen.app 으로 열고, 그 파일을 작업 대�
 
 | | |
 |---|---|
-| OS | macOS (`open -a`, BSD `ps` 에 의존) |
+| OS | macOS 또는 Linux |
 | fish | 3.5 이상 (`path` 내장 사용) |
 | 필수 명령 | [`fd`](https://github.com/sharkdp/fd), [`fzf`](https://github.com/junegunn/fzf) |
-| 앱 | [Pencil](https://pencil.dev) (`Pen.app`) |
+| 앱 | [Pencil](https://pencil.dev) 데스크톱 앱 |
 | 에이전트 | `codex` 또는 `claude` CLI 중 최소 하나 |
-| 훅 설치용 | `python3`, macOS 손쉬운 사용 권한 (`osascript`) |
+| 훅 설치용 | `python3`; macOS는 손쉬운 사용 권한, Linux는 `pen` 또는 `pencil` CLI |
 
 에이전트 쪽에 **Pencil MCP 서버가 등록되어 있어야 한다**. `cpen` 이 대신
 설정해주지는 않는다.
@@ -82,6 +82,10 @@ Herdr 0.7.5 이상이 필요하다. Tailscale이 실행 중이면 해당 인터�
 서버를 열고 토큰이 포함된 URL을 표시한다. 같은 tailnet의 브라우저에서 URL을 열면
 원본 비율의 이미지를 Fit 또는 100%로 볼 수 있다. Tailscale을 찾지 못하면 localhost
 주소와 SSH 터널 명령을 대신 표시한다.
+
+Linux에서는 Pencil 데스크톱의 기본 사용자 설치 경로
+`~/.local/opt/pen`과 `pen-desktop` 또는 `xdg-open`을 사용한다. 다른 위치에 설치했다면
+`CPEN_PENCIL_MCP`와 `CPEN_PENCIL_APP`에 각각 MCP 서버와 앱 실행 경로를 지정한다.
 
 ```sh
 herdr plugin link /absolute/path/to/cpen
@@ -174,9 +178,11 @@ cpen-focus
 cpen-focus design/a.pen
 ```
 
-자동 저장 훅은 응답이 끝날 때 대상 창을 잠깐 활성화해 저장하고, 직전에 사용하던 앱으로
-포커스를 즉시 돌려놓는다. 여러 Pen 창이 열려 있어도 `CPEN_PEN_FILE`의 정확한 파일 URL로
-대상 창을 고른다. 최초 실행에서 macOS가 손쉬운 사용 권한을 요청할 수 있다.
+macOS 자동 저장 훅은 응답이 끝날 때 대상 창을 잠깐 활성화해 저장하고, 직전에 사용하던
+앱으로 포커스를 즉시 돌려놓는다. 여러 Pen 창이 열려 있어도 `CPEN_PEN_FILE`의 정확한
+파일 URL로 대상 창을 고른다. 최초 실행에서 macOS가 손쉬운 사용 권한을 요청할 수 있다.
+Linux에서는 `pen interactive --app desktop --in <파일>`에 `save()`를 전달하므로 창
+포커스를 바꾸지 않는다. Pencil 데스크톱 앱이 실행 중이고 CLI 인증이 완료되어 있어야 한다.
 
 예전 버전이 설치한 `cpen-focus` Stop 훅은 `cpen --install-hooks` 또는
 `cpen --uninstall-hooks` 실행 시 제거한다.

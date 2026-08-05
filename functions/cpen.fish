@@ -21,6 +21,10 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
     end
 
     if set -q _flag_install_hooks
+        if test (uname -s) = Linux; and not type -q pen; and not type -q pencil
+            echo "cpen: Linux 자동 저장 훅에는 pen 또는 pencil CLI가 필요합니다" >&2
+            return 1
+        end
         _cpen_hooks install
         return $status
     end
@@ -151,8 +155,21 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
     end
 
     if not set -q CPEN_SKIP_OPEN
-        if not open -a Pen "$pen_file"
-            echo "cpen: Pen.app 으로 파일을 열지 못했습니다: $pen_file" >&2
+        set -l open_command
+        switch (uname -s)
+            case Darwin
+                set open_command open -a Pen
+            case Linux
+                if test -n "$CPEN_PENCIL_APP"
+                    set open_command $CPEN_PENCIL_APP
+                else if command -q pen-desktop
+                    set open_command pen-desktop
+                else
+                    set open_command xdg-open
+                end
+        end
+        if test (count $open_command) -eq 0; or not $open_command "$pen_file"
+            echo "cpen: Pencil 데스크톱 앱으로 파일을 열지 못했습니다: $pen_file" >&2
             test $holds_lease -eq 1; and _cpen_lease release $pen_file $token
             return 1
         end

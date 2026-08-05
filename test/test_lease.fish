@@ -28,6 +28,18 @@ function expect_status -a label expected actual
     end
 end
 
+set -l original_path $PATH
+mkdir -p $TMP/hash-bin
+ln -s (command -s shasum) $TMP/hash-bin/sha256sum
+set -gx PATH $TMP/hash-bin
+set -l linux_key (_cpen_lease_key /tmp/linux.pen)
+set -gx PATH $original_path
+if test (string length "$linux_key") -eq 16
+    ok "shasum이 없으면 sha256sum으로 리스 키를 만든다"
+else
+    fail "sha256sum fallback" "$linux_key"
+end
+
 # 리스는 owner pid 가 codex/claude 일 때만 살아있다고 본다.
 # 그래서 그 이름으로 실행되는 가짜 프로세스를 만들어 쓴다.
 mkdir -p $TMP/bin

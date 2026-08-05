@@ -1,4 +1,4 @@
-function cpen-focus --description "작업 대상 .pen 을 Pen.app 최전면으로 가져온다"
+function cpen-focus --description "작업 대상 .pen 을 Pencil 데스크톱 앱으로 연다"
     # 사람이 직접 `cpen-focus` 또는 `cpen-focus <경로>` 로 호출할 때만 창을 올린다.
     # `--if-touched` 는 구버전 Stop 훅이 남아 있는 실행 중 세션의 호환용 no-op 이다.
     argparse if-touched -- $argv
@@ -18,8 +18,21 @@ function cpen-focus --description "작업 대상 .pen 을 Pen.app 최전면으�
         return 1
     end
 
-    if not open -a Pen "$file" 2>/dev/null
-        echo "cpen-focus: Pen.app 으로 열지 못했습니다: $file" >&2
+    set -l open_command
+    switch (uname -s)
+        case Darwin
+            set open_command open -a Pen
+        case Linux
+            if test -n "$CPEN_PENCIL_APP"
+                set open_command $CPEN_PENCIL_APP
+            else if command -q pen-desktop
+                set open_command pen-desktop
+            else
+                set open_command xdg-open
+            end
+    end
+    if test (count $open_command) -eq 0; or not $open_command "$file" 2>/dev/null
+        echo "cpen-focus: Pencil 데스크톱 앱으로 열지 못했습니다: $file" >&2
         return 1
     end
 end

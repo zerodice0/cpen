@@ -34,6 +34,30 @@ function cpen-save --description "cpen 대상 .pen 파일 저장"
         return 1
     end
 
+    if test (uname -s) = Linux
+        set -l pencil_cli
+        if type -q pen
+            set pencil_cli pen
+        else if type -q pencil
+            set pencil_cli pencil
+        else
+            echo "cpen-save: pen 또는 pencil CLI를 찾을 수 없습니다" >&2
+            return 1
+        end
+
+        printf 'save()\nexit()\n' | \
+            $pencil_cli interactive --app desktop --in "$pen_file" \
+                >/dev/null 2>&1
+        test $status -eq 0; or return 1
+
+        if set -q _flag_hook
+            echo '{}'
+        else
+            echo "cpen: 저장 완료 ($pen_file)"
+        end
+        return 0
+    end
+
     set -l save_result (osascript \
         -e 'use framework "Foundation"' \
         -e 'on run argv' \

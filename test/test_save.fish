@@ -64,6 +64,50 @@ else
 end
 set -e MOCK_OSASCRIPT_STATUS
 
+function uname
+    echo Linux
+end
+
+function pen
+    printf '%s\n' $argv >$TMP/pen.args
+    while read -l line
+        echo $line >>$TMP/pen.stdin
+    end
+    return (set -q MOCK_PEN_STATUS; and echo $MOCK_PEN_STATUS; or echo 0)
+end
+
+set -l output (cpen-save)
+if test $status -eq 0; and string match -q 'cpen: 저장 완료*' -- $output; and \
+        grep -Fxq interactive $TMP/pen.args; and \
+        grep -Fxq desktop $TMP/pen.args; and \
+        grep -Fxq (path resolve "$pen_file") $TMP/pen.args; and \
+        grep -Fxq 'save()' $TMP/pen.stdin; and \
+        grep -Fxq 'exit()' $TMP/pen.stdin
+    echo "  ok   Linux에서는 Pencil CLI로 정확한 파일을 저장한다"
+else
+    echo "  FAIL Linux Pencil CLI 저장"
+    set -g FAILED (math $FAILED + 1)
+end
+
+set -l output (cpen-save --hook)
+if test $status -eq 0; and test "$output" = '{}'
+    echo "  ok   Linux Stop 훅도 유효한 JSON을 반환한다"
+else
+    echo "  FAIL Linux Stop 훅 JSON"
+    set -g FAILED (math $FAILED + 1)
+end
+
+set -g MOCK_PEN_STATUS 1
+cpen-save --hook >/dev/null 2>&1
+if test $status -eq 1
+    echo "  ok   Linux Pencil CLI 오류를 훅 실패로 전달한다"
+else
+    echo "  FAIL Linux Pencil CLI 오류 전달"
+    set -g FAILED (math $FAILED + 1)
+end
+set -e MOCK_PEN_STATUS
+functions -e uname pen
+
 set -e CPEN_PEN_FILE
 cpen-save >/dev/null 2>&1
 if test $status -eq 1

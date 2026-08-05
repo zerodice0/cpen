@@ -44,7 +44,11 @@ function _cpen_lease_key --description "경로 -> 파일명 안전한 키"
     # 키를 만들기 전에 반드시 정규화한다. macOS 는 /var 가 /private/var 심볼릭 링크라
     # 같은 파일이 두 경로로 들어오는데, 정규화하지 않으면 리스가 서로를 못 본다.
     # 경로를 그대로 파일명에 쓰면 길이/슬래시 문제가 생기므로 해시한다.
-    printf '%s' (path resolve $argv[1]) | shasum -a 256 | string split -f1 ' ' | string sub -l 16
+    if command -q shasum
+        printf '%s' (path resolve $argv[1]) | shasum -a 256 | string split -f1 ' ' | string sub -l 16
+    else
+        printf '%s' (path resolve $argv[1]) | sha256sum | string split -f1 ' ' | string sub -l 16
+    end
 end
 
 function _cpen_lease_alive --description "리스 디렉토리가 살아있는 세션의 것인지"
