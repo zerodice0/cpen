@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import select
 import shlex
@@ -489,6 +490,157 @@ class PencilMCP:
                 self.process.kill()
 
 
+class PreviewImageCache:
+    def __init__(self, mcp: PencilMCP, file_path: str, output_dir: str) -> None:
+        self.mcp = mcp
+        self.file_path = file_path
+        self.output_dir = output_dir
+        self.images: dict[str, str] = {}
+        self.generation = 1
+        self.wanted_frame = ""
+        self.sequence = 0
+        self.closed = False
+        self.lock = threading.Lock()
+        self.jobs: queue.PriorityQueue[tuple] = queue.PriorityQueue()
+        self.results: queue.SimpleQueue[dict] = queue.SimpleQueue()
+        self.thread = threading.Thread(
+            target=self._run, name="cpen-preview-export", daemon=True
+        )
+        self.thread.start()
+
+    def _next_sequence(self) -> int:
+        with self.lock:
+            self.sequence += 1
+            return self.sequence
+
+    def _schedule(self, frame: dict, urgent: bool, generation: int) -> None:
+        sequence = self._next_sequence()
+        priority = 0 if urgent else 1
+        order = -sequence if urgent else sequence
+        self.jobs.put(
+            (
+                priority,
+                order,
+                "image",
+                generation,
+                str(frame["id"]),
+                str(frame["name"]),
+            )
+        )
+
+    def seed(self, frame_id: str, png: str) -> None:
+        with self.lock:
+            self.images[frame_id] = png
+
+    def warm(
+        self,
+        frames: list[dict],
+        selected_id: str,
+        generation: int | None = None,
+    ) -> None:
+        with self.lock:
+            current_generation = self.generation
+            if generation is not None and generation != current_generation:
+                return
+            self.wanted_frame = selected_id
+        for frame in frames:
+            if frame["id"] == selected_id:
+                self._schedule(frame, True, current_generation)
+            else:
+                self._schedule(frame, False, current_generation)
+
+    def select(self, frame: dict) -> str | None:
+        frame_id = str(frame["id"])
+        with self.lock:
+            self.wanted_frame = frame_id
+            png = self.images.get(frame_id)
+            generation = self.generation
+        if png is None:
+            self._schedule(frame, True, generation)
+        return png
+
+    def reload(self, selected_id: str) -> None:
+        with self.lock:
+            self.generation += 1
+            generation = self.generation
+            self.images.clear()
+            self.wanted_frame = selected_id
+        self.jobs.put(
+            (-1, self._next_sequence(), "reload", generation, selected_id, "")
+        )
+
+    def get(self, frame_id: str) -> str | None:
+        with self.lock:
+            return self.images.get(frame_id)
+
+    def poll(self) -> list[dict]:
+        items = []
+        while True:
+            try:
+                item = self.results.get_nowait()
+                with self.lock:
+                    if item["generation"] == self.generation:
+                        items.append(item)
+            except queue.Empty:
+                return items
+
+    def _run(self) -> None:
+        while True:
+            priority, _order, kind, generation, frame_id, frame_name = self.jobs.get()
+            if kind == "close":
+                return
+            with self.lock:
+                if self.closed or generation != self.generation:
+                    continue
+                if kind == "image":
+                    if frame_id in self.images:
+                        continue
+                    if priority == 0 and frame_id != self.wanted_frame:
+                        continue
+            try:
+                if kind == "reload":
+                    frames = self.mcp.frames(self.file_path)
+                    result = {
+                        "kind": "frames",
+                        "generation": generation,
+                        "frames": frames,
+                        "selected_id": frame_id,
+                    }
+                else:
+                    png = self.mcp.export_png(
+                        self.file_path, frame_id, self.output_dir
+                    )
+                    with self.lock:
+                        if self.closed or generation != self.generation:
+                            continue
+                        self.images[frame_id] = png
+                    result = {
+                        "kind": "image",
+                        "generation": generation,
+                        "frame_id": frame_id,
+                        "frame_name": frame_name,
+                        "png": png,
+                    }
+            except (OSError, RuntimeError, json.JSONDecodeError) as error:
+                with self.lock:
+                    if self.closed:
+                        return
+                result = {
+                    "kind": "error",
+                    "generation": generation,
+                    "message": str(error),
+                }
+            self.results.put(result)
+
+    def close(self) -> None:
+        with self.lock:
+            self.closed = True
+            self.generation += 1
+        self.jobs.put((-2, self._next_sequence(), "close", 0, "", ""))
+        self.mcp.close()
+        self.thread.join(timeout=2)
+
+
 def herdr_request(method: str, params: dict) -> dict:
     path = os.environ.get("HERDR_SOCKET_PATH", "")
     if not path:
@@ -705,12 +857,13 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
 
     selected = 0
     frames: list[dict] = []
-    current_png = ""
     web = PreviewWebServer(file_path)
     export_dir = tempfile.TemporaryDirectory(prefix="cpen-preview-")
+    cache: PreviewImageCache | None = None
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     resized = True
     last_mtime = 0.0
+    status_message = ""
 
     def on_resize(_signum: int, _frame: object) -> None:
         nonlocal resized
@@ -731,7 +884,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         if compact:
             name = frames[selected]["name"] if frames else ""
             sys.stdout.write(f"› {clipped(name, max(1, size.columns - 2))}\n")
-            sys.stdout.write("j/k frame  r reload  q close")
+            controls = "j/k frame  r reload  q close"
         else:
             visible = frames[
                 max(0, selected - 2): max(0, selected - 2) + menu_rows - 3
@@ -740,37 +893,90 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
             for offset, frame in enumerate(visible):
                 marker = "›" if start + offset == selected else " "
                 sys.stdout.write(f"{marker} {frame['name']}\n")
-            sys.stdout.write("↑/↓ or j/k: frame  r: reload  q: close")
+            controls = "↑/↓ or j/k: frame  r: reload  q: close"
+        if status_message:
+            controls += f" · {status_message}"
+        sys.stdout.write(clipped(controls, size.columns))
         sys.stdout.flush()
         resized = False
 
-    def reload_frames() -> None:
-        nonlocal frames, selected, current_png, last_mtime
-        old_id = frames[selected]["id"] if frames else ""
-        frames = mcp.frames(file_path)
-        if not frames:
-            raise RuntimeError("미리볼 최상위 프레임이 없습니다")
-        selected = next((i for i, item in enumerate(frames) if item["id"] == old_id), 0)
-        current_png = mcp.export_png(
-            file_path, frames[selected]["id"], export_dir.name
-        )
-        web.update(current_png, frames[selected]["name"])
-        last_mtime = Path(file_path).stat().st_mtime
+    def show_selected() -> None:
+        nonlocal status_message
+        if not frames or not cache:
+            return
+        frame = frames[selected]
+        png = cache.get(frame["id"])
+        status_message = "" if png else "이미지 준비 중"
+        draw()
+        png = cache.select(frame)
+        if png:
+            web.update(png, frame["name"])
+
+    def request_reload() -> None:
+        nonlocal status_message
+        if not cache:
+            return
+        selected_id = frames[selected]["id"] if frames else ""
+        status_message = "이미지 캐시 갱신 중"
+        cache.reload(selected_id)
+        draw()
+
+    def process_cache_results() -> None:
+        nonlocal frames, selected, status_message
+        if not cache:
+            return
+        for result in cache.poll():
+            if result["kind"] == "frames":
+                new_frames = result["frames"]
+                if not new_frames:
+                    raise RuntimeError("미리볼 최상위 프레임이 없습니다")
+                old_id = (
+                    frames[selected]["id"] if frames else result["selected_id"]
+                )
+                frames = new_frames
+                selected = next(
+                    (i for i, item in enumerate(frames) if item["id"] == old_id),
+                    0,
+                )
+                status_message = "이미지 준비 중"
+                cache.warm(
+                    frames, frames[selected]["id"], result["generation"]
+                )
+                draw()
+            elif result["kind"] == "image":
+                if frames and frames[selected]["id"] == result["frame_id"]:
+                    status_message = ""
+                    web.update(result["png"], result["frame_name"])
+                    draw()
+            else:
+                status_message = f"이미지 갱신 실패: {result['message']}"
+                draw()
 
     signal.signal(signal.SIGWINCH, on_resize)
     exit_code = 0
     try:
         web.start()
-        reload_frames()
+        frames = mcp.frames(file_path)
+        if not frames:
+            raise RuntimeError("미리볼 최상위 프레임이 없습니다")
+        initial_png = mcp.export_png(
+            file_path, frames[selected]["id"], export_dir.name
+        )
+        web.update(initial_png, frames[selected]["name"])
+        cache = PreviewImageCache(mcp, file_path, export_dir.name)
+        cache.seed(frames[selected]["id"], initial_png)
+        cache.warm(frames, frames[selected]["id"])
+        last_mtime = Path(file_path).stat().st_mtime
         if ready_path and not ready_signaled:
             Path(ready_path).touch()
             ready_signaled = True
         tty.setcbreak(sys.stdin.fileno())
         draw()
         while True:
+            process_cache_results()
             if resized:
                 draw()
-            ready, _, _ = select.select([sys.stdin], [], [], 1.0)
+            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
             if ready:
                 key = os.read(sys.stdin.fileno(), 1)
                 if key == b"\x1b" and select.select([sys.stdin], [], [], 0.03)[0]:
@@ -779,24 +985,17 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
                     break
                 if key in (b"j", b"\x1b[B") and selected < len(frames) - 1:
                     selected += 1
-                    current_png = mcp.export_png(
-                        file_path, frames[selected]["id"], export_dir.name
-                    )
-                    web.update(current_png, frames[selected]["name"])
-                    draw()
+                    show_selected()
                 elif key in (b"k", b"\x1b[A") and selected > 0:
                     selected -= 1
-                    current_png = mcp.export_png(
-                        file_path, frames[selected]["id"], export_dir.name
-                    )
-                    web.update(current_png, frames[selected]["name"])
-                    draw()
+                    show_selected()
                 elif key in (b"r", b"R", b"\r", b"\n"):
-                    reload_frames()
-                    draw()
-            elif Path(file_path).stat().st_mtime != last_mtime:
-                reload_frames()
-                draw()
+                    last_mtime = Path(file_path).stat().st_mtime
+                    request_reload()
+            current_mtime = Path(file_path).stat().st_mtime
+            if current_mtime != last_mtime:
+                last_mtime = current_mtime
+                request_reload()
     except (OSError, RuntimeError, json.JSONDecodeError) as error:
         sys.stdout.write(f"\x1b[2J\x1b[Hcpen preview 오류\n\n{error}\n")
         sys.stdout.flush()
@@ -805,7 +1004,10 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
         web.close()
-        mcp.close()
+        if cache:
+            cache.close()
+        else:
+            mcp.close()
         export_dir.cleanup()
     if source_pane:
         subprocess.run(

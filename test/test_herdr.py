@@ -5,6 +5,8 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 from urllib.request import urlopen
@@ -119,6 +121,10 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertTrue(link.endswith("\x1b]8;;\x1b\\"))
         self.assertEqual(shown_url, url)
 
+    def test_browser_preview_polls_cached_images_quickly(self):
+        html = MODULE.PREVIEW_HTML.read_text()
+        self.assertIn("setInterval(refresh, 150)", html)
+
     def test_pane_run_accepts_empty_stdout(self):
         completed = mock.Mock(returncode=0, stdout="", stderr="")
         with mock.patch.object(MODULE.subprocess, "run", return_value=completed):
@@ -203,6 +209,78 @@ class HerdrPreviewTests(unittest.TestCase):
                 encoded = mcp.export_png("/tmp/design.pen", "frame", output_dir)
             self.assertEqual(base64.b64decode(encoded), png)
             self.assertEqual(list(Path(output_dir).iterdir()), [])
+
+    def test_preview_cache_exports_without_blocking_selection(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class MCP:
+            def export_png(self, _file_path, frame_id, _output_dir):
+                started.set()
+                release.wait(timeout=2)
+                return f"png:{frame_id}"
+
+            def frames(self, _file_path):
+                return []
+
+            def close(self):
+                release.set()
+
+        cache = MODULE.PreviewImageCache(MCP(), "/tmp/design.pen", "/tmp")
+        frame = {"id": "frame-1", "name": "Frame 01"}
+        try:
+            self.assertIsNone(cache.select(frame))
+            self.assertTrue(started.wait(timeout=1))
+            self.assertIsNone(cache.get("frame-1"))
+            release.set()
+
+            deadline = time.monotonic() + 2
+            results = []
+            while not results and time.monotonic() < deadline:
+                results = cache.poll()
+                time.sleep(0.01)
+
+            self.assertTrue(results)
+            self.assertEqual(results[0]["kind"], "image")
+            self.assertEqual(cache.get("frame-1"), "png:frame-1")
+        finally:
+            cache.close()
+
+    def test_preview_cache_discards_export_from_old_generation(self):
+        started = threading.Event()
+        release = threading.Event()
+        frames = [{"id": "frame-1", "name": "Frame 01"}]
+
+        class MCP:
+            def export_png(self, _file_path, frame_id, _output_dir):
+                started.set()
+                release.wait(timeout=2)
+                return f"stale:{frame_id}"
+
+            def frames(self, _file_path):
+                return frames
+
+            def close(self):
+                release.set()
+
+        cache = MODULE.PreviewImageCache(MCP(), "/tmp/design.pen", "/tmp")
+        try:
+            cache.warm(frames, "frame-1")
+            self.assertTrue(started.wait(timeout=1))
+            cache.reload("frame-1")
+            release.set()
+
+            deadline = time.monotonic() + 2
+            results = []
+            while not results and time.monotonic() < deadline:
+                results = cache.poll()
+                time.sleep(0.01)
+
+            self.assertTrue(results)
+            self.assertEqual([item["kind"] for item in results], ["frames"])
+            self.assertIsNone(cache.get("frame-1"))
+        finally:
+            cache.close()
 
 
 if __name__ == "__main__":
