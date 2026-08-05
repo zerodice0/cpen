@@ -3,12 +3,18 @@
 
 set -l here (path dirname (status filename))
 set -l root (path resolve $here/..)
-source $root/functions/cpen.fish
-
 set -g TMP (mktemp -d)
 set -g FAILED 0
 mkdir -p $TMP/design
 touch $TMP/design/a.pen
+mkdir -p $TMP/fish/functions
+cp $root/functions/cpen.fish $TMP/fish/functions/cpen.fish
+set -gx XDG_CONFIG_HOME $TMP/config
+set -l binding_script \
+    $XDG_CONFIG_HOME/herdr/plugins/github/zerodice0.cpen-test/herdr/cpen_session.py
+mkdir -p (path dirname $binding_script)
+touch $binding_script
+source $TMP/fish/functions/cpen.fish
 
 function git
     echo $TMP
@@ -91,7 +97,8 @@ else
     echo "  ok   초기 프롬프트에 차단 안내가 없다"
 end
 
-if grep -q '^bind$' $TMP/bind.log; and \
+if grep -Fxq "$binding_script" $TMP/bind.log; and \
+        grep -q '^bind$' $TMP/bind.log; and \
         grep -q '^w1:p9$' $TMP/bind.log; and \
         grep -q (path resolve $TMP/design/a.pen) $TMP/bind.log
     echo "  ok   Herdr pane과 .pen 연결을 기록한다"

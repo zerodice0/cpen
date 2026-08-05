@@ -162,6 +162,18 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
         set -l function_file (functions --details cpen)
         set -l binding_script \
             (path resolve (path dirname "$function_file")/../herdr/cpen_session.py)
+        if not test -f "$binding_script"
+            set -l config_home $XDG_CONFIG_HOME
+            test -n "$config_home"; or set config_home (path resolve ~/.config)
+            set -l plugin_root "$config_home/herdr/plugins/github"
+            if test -d "$plugin_root"
+                set binding_script (
+                    command find "$plugin_root" \
+                        -path '*/zerodice0.cpen-*/herdr/cpen_session.py' \
+                        -type f -print 2>/dev/null | command head -n 1
+                )
+            end
+        end
         if test -f "$binding_script"
             python3 "$binding_script" bind "$HERDR_PANE_ID" "$pen_file" \
                 >/dev/null 2>&1
