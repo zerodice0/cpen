@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -7,51 +7,94 @@
   <style>
     :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #0b0d12; color: #e6e9f2; }
+    body { margin: 0; background: #0b0d12; color: #e6e9f2; overscroll-behavior: none; }
     header {
       position: sticky; top: 0; z-index: 1; display: flex; gap: 16px;
-      align-items: center; padding: 12px 16px; background: #151923;
+      align-items: center; min-height: 62px;
+      padding: max(12px, env(safe-area-inset-top)) 16px 12px;
+      background: #151923;
       border-bottom: 1px solid #2b3242;
     }
     .titles { min-width: 0; flex: 1; }
     #file { font-size: 13px; color: #8e98ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #frame { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     button {
-      border: 1px solid #3a4357; border-radius: 7px; padding: 7px 11px;
+      min-width: 44px; min-height: 44px; border: 1px solid #3a4357;
+      border-radius: 9px; padding: 7px 11px;
       color: #dfe5f2; background: #222838; cursor: pointer;
+      touch-action: manipulation;
     }
+    button:focus-visible { outline: 2px solid #82a2ff; outline-offset: 2px; }
     button.active { color: white; border-color: #638cff; background: #315fda; }
+    button:disabled { opacity: .35; cursor: default; }
     main {
       height: calc(100vh - 62px); display: flex; align-items: center;
-      justify-content: center; overflow: auto; padding: 24px;
+      justify-content: center; overflow: auto; padding: 24px 24px 92px;
     }
     img { display: block; image-rendering: auto; box-shadow: 0 18px 60px #0009; }
+    img[hidden] { display: none; }
     main.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    main.fit { touch-action: pan-y pinch-zoom; }
     main.actual { display: block; }
     main.actual img { max-width: none; max-height: none; margin: 0 auto; }
     #loading { color: #8e98ad; }
+    .navigator {
+      position: fixed; z-index: 2; left: 50%; bottom: max(16px, env(safe-area-inset-bottom));
+      transform: translateX(-50%); display: flex; align-items: center; gap: 8px;
+      padding: 8px; border: 1px solid #3a4357; border-radius: 14px;
+      background: #151923e8; box-shadow: 0 12px 36px #0009;
+      backdrop-filter: blur(12px);
+    }
+    .navigator button { font-size: 18px; font-weight: 700; }
+    #position { min-width: 66px; text-align: center; color: #b8c0d2; font-variant-numeric: tabular-nums; }
+    #gesture-hint {
+      position: fixed; right: 16px; bottom: max(22px, env(safe-area-inset-bottom));
+      color: #737f96; font-size: 12px; pointer-events: none;
+    }
+    @media (max-width: 640px) {
+      header { gap: 8px; padding-left: 12px; padding-right: 12px; }
+      header button { min-width: 40px; min-height: 40px; padding: 6px 9px; }
+      main { padding: 12px 12px 88px; }
+      #gesture-hint { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      * { scroll-behavior: auto !important; }
+    }
   </style>
 </head>
 <body>
   <header>
     <div class="titles">
       <div id="file">Pencil preview</div>
-      <div id="frame">Connecting…</div>
+      <div id="frame" aria-live="polite">연결 중…</div>
     </div>
     <button id="fit" class="active" type="button">Fit</button>
     <button id="actual" type="button">100%</button>
   </header>
   <main id="stage" class="fit">
-    <div id="loading">Waiting for the first frame…</div>
+    <div id="loading">첫 프레임을 기다리는 중…</div>
     <img id="preview" alt="Pencil frame" hidden>
   </main>
+  <nav class="navigator" aria-label="프레임 이동">
+    <button id="previous" type="button" aria-label="이전 프레임" disabled>↑</button>
+    <span id="position" aria-live="polite">– / –</span>
+    <button id="next" type="button" aria-label="다음 프레임" disabled>↓</button>
+    <button id="reload" type="button" aria-label="다시 불러오기">↻</button>
+  </nav>
+  <div id="gesture-hint">스와이프 · j/k · ↑/↓ · r</div>
   <script>
     const stage = document.getElementById('stage');
     const image = document.getElementById('preview');
     const loading = document.getElementById('loading');
     const fit = document.getElementById('fit');
     const actual = document.getElementById('actual');
+    const previous = document.getElementById('previous');
+    const next = document.getElementById('next');
+    const reload = document.getElementById('reload');
+    const position = document.getElementById('position');
     let revision = -1;
+    let pointerStart = null;
+    let didSwipe = false;
 
     function setMode(mode) {
       stage.className = mode;
@@ -60,14 +103,63 @@
     }
     fit.onclick = () => setMode('fit');
     actual.onclick = () => setMode('actual');
-    image.onclick = () => setMode(stage.className === 'fit' ? 'actual' : 'fit');
+    image.onclick = () => {
+      if (!didSwipe) setMode(stage.className === 'fit' ? 'actual' : 'fit');
+    };
+
+    async function send(command) {
+      try {
+        await fetch('command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command }),
+        });
+      } catch (_) {
+        document.getElementById('frame').textContent = '미리보기 연결 끊김';
+      }
+    }
+
+    previous.onclick = () => send('previous');
+    next.onclick = () => send('next');
+    reload.onclick = () => send('reload');
+
+    document.addEventListener('keydown', event => {
+      const key = event.key.toLowerCase();
+      if (event.target.closest?.('button') && (key === 'enter' || key === ' ')) return;
+      if (key === 'j' || key === 'arrowdown') send('next');
+      else if (key === 'k' || key === 'arrowup') send('previous');
+      else if (key === 'r' || key === 'enter') send('reload');
+      else if (key === 'q') send('close');
+      else return;
+      event.preventDefault();
+    });
+
+    stage.addEventListener('pointerdown', event => {
+      pointerStart = { x: event.clientX, y: event.clientY };
+      didSwipe = false;
+    });
+    stage.addEventListener('pointerup', event => {
+      if (!pointerStart) return;
+      const dx = event.clientX - pointerStart.x;
+      const dy = event.clientY - pointerStart.y;
+      pointerStart = null;
+      if (stage.className !== 'fit') return;
+      if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
+      didSwipe = true;
+      send(dx < 0 ? 'next' : 'previous');
+      setTimeout(() => { didSwipe = false; }, 0);
+    });
+    stage.addEventListener('pointercancel', () => { pointerStart = null; });
 
     async function refresh() {
       try {
         const response = await fetch('state.json', { cache: 'no-store' });
         const state = await response.json();
         document.getElementById('file').textContent = state.file;
-        document.getElementById('frame').textContent = state.frame || 'Loading…';
+        document.getElementById('frame').textContent = state.frame || '불러오는 중…';
+        position.textContent = state.count ? `${state.position} / ${state.count}` : '– / –';
+        previous.disabled = state.position <= 1;
+        next.disabled = !state.count || state.position >= state.count;
         document.title = `${state.frame || 'Pencil'} · preview`;
         if (state.ready && state.revision !== revision) {
           revision = state.revision;
@@ -75,7 +167,7 @@
           image.src = `frame.png?v=${revision}`;
         }
       } catch (_) {
-        document.getElementById('frame').textContent = 'Preview disconnected';
+        document.getElementById('frame').textContent = '미리보기 연결 끊김';
       }
     }
     refresh();

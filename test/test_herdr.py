@@ -9,7 +9,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "herdr" / "cpen_session.py"
@@ -450,17 +450,51 @@ class HerdrPreviewTests(unittest.TestCase):
             preview = MODULE.PreviewWebServer("/tmp/design.pen")
             preview.start()
         try:
-            preview.update(base64.b64encode(png).decode(), "Frame 01")
+            preview.update(base64.b64encode(png).decode(), "Frame 02", 2, 4)
             with urlopen(preview.url + "state.json", timeout=2) as response:
                 state = json.loads(response.read())
             with urlopen(preview.url + "frame.png", timeout=2) as response:
                 served_png = response.read()
             self.assertEqual(state["file"], "design.pen")
-            self.assertEqual(state["frame"], "Frame 01")
+            self.assertEqual(state["frame"], "Frame 02")
             self.assertEqual(state["revision"], 1)
+            self.assertEqual(state["position"], 2)
+            self.assertEqual(state["count"], 4)
             self.assertEqual(served_png, png)
         finally:
             preview.close()
+
+    def test_browser_preview_accepts_navigation_commands(self):
+        with mock.patch.dict(
+            MODULE.os.environ,
+            {
+                "CPEN_PREVIEW_BIND": "127.0.0.1",
+                "CPEN_PREVIEW_HOST": "127.0.0.1",
+            },
+            clear=False,
+        ):
+            preview = MODULE.PreviewWebServer("/tmp/design.pen")
+            preview.start()
+        try:
+            request = Request(
+                preview.url + "command",
+                data=json.dumps({"command": "next"}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 204)
+            self.assertEqual(preview.poll_commands(), ["next"])
+        finally:
+            preview.close()
+
+    def test_browser_preview_has_keyboard_touch_and_button_navigation(self):
+        html = MODULE.PREVIEW_HTML.read_text()
+        self.assertIn("id=\"previous\"", html)
+        self.assertIn("id=\"next\"", html)
+        self.assertIn("keydown", html)
+        self.assertIn("pointerdown", html)
+        self.assertIn("send(dx < 0 ? 'next' : 'previous')", html)
 
     def test_export_png_reads_and_immediately_deletes_file(self):
         mcp = object.__new__(MODULE.PencilMCP)

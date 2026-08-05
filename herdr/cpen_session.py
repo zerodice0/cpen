@@ -1071,6 +1071,9 @@ class PreviewWebServer:
         self.url = ""
         self.network = ""
         self.tunnel_command = ""
+        self.position = 0
+        self.count = 0
+        self.commands: queue.Queue[str] = queue.Queue()
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         preview = self
@@ -1100,6 +1103,8 @@ class PreviewWebServer:
                             "frame": preview.frame_name,
                             "revision": preview.revision,
                             "ready": bool(preview.png),
+                            "position": preview.position,
+                            "count": preview.count,
                         }
                     self.send_bytes(
                         200,
@@ -1116,6 +1121,24 @@ class PreviewWebServer:
                         self.send_bytes(200, "image/png", png)
                     return
                 self.send_bytes(404, "text/plain; charset=utf-8", b"not found")
+
+            def do_POST(self) -> None:
+                path = urlparse(self.path).path
+                if path != root + "/command":
+                    self.send_bytes(404, "text/plain; charset=utf-8", b"not found")
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length))
+                    command = str(payload.get("command", ""))
+                except (ValueError, json.JSONDecodeError):
+                    self.send_bytes(400, "text/plain; charset=utf-8", b"bad request")
+                    return
+                if command not in {"previous", "next", "reload", "close"}:
+                    self.send_bytes(400, "text/plain; charset=utf-8", b"bad command")
+                    return
+                preview.commands.put(command)
+                self.send_bytes(204, "text/plain; charset=utf-8", b"")
 
             def log_message(self, _format: str, *_args: object) -> None:
                 pass
@@ -1155,11 +1178,23 @@ class PreviewWebServer:
                 last_error = error
         raise RuntimeError(f"브라우저 preview 서버를 열지 못했습니다: {last_error}")
 
-    def update(self, data_base64: str, frame_name: str) -> None:
+    def update(
+        self, data_base64: str, frame_name: str, position: int = 1, count: int = 1
+    ) -> None:
         with self.lock:
             self.png = base64.b64decode(data_base64)
             self.frame_name = frame_name
+            self.position = position
+            self.count = count
             self.revision += 1
+
+    def poll_commands(self) -> list[str]:
+        commands = []
+        while True:
+            try:
+                commands.append(self.commands.get_nowait())
+            except queue.Empty:
+                return commands
 
     def close(self) -> None:
         if self.server:
@@ -1268,7 +1303,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         draw()
         png = cache.select(frame)
         if png:
-            web.update(png, frame["name"])
+            web.update(png, frame["name"], selected + 1, len(frames))
 
     def request_reload() -> None:
         nonlocal status_message
@@ -1278,6 +1313,21 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         status_message = "이미지 캐시 갱신 중"
         cache.reload(selected_id)
         draw()
+
+    def handle_command(command: str) -> bool:
+        nonlocal selected, last_mtime
+        if command == "close":
+            return False
+        if command == "next" and selected < len(frames) - 1:
+            selected += 1
+            show_selected()
+        elif command == "previous" and selected > 0:
+            selected -= 1
+            show_selected()
+        elif command == "reload":
+            last_mtime = Path(file_path).stat().st_mtime
+            request_reload()
+        return True
 
     def process_cache_results() -> None:
         nonlocal frames, selected, status_message
@@ -1304,7 +1354,9 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
             elif result["kind"] == "image":
                 if frames and frames[selected]["id"] == result["frame_id"]:
                     status_message = ""
-                    web.update(result["png"], result["frame_name"])
+                    web.update(
+                        result["png"], result["frame_name"], selected + 1, len(frames)
+                    )
                     draw()
             else:
                 status_message = f"이미지 갱신 실패: {result['message']}"
@@ -1320,7 +1372,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         initial_png = mcp.export_png(
             file_path, frames[selected]["id"], export_dir.name
         )
-        web.update(initial_png, frames[selected]["name"])
+        web.update(initial_png, frames[selected]["name"], selected + 1, len(frames))
         cache = PreviewImageCache(mcp, file_path, export_dir.name)
         cache.seed(frames[selected]["id"], initial_png)
         cache.warm(frames, frames[selected]["id"])
@@ -1332,6 +1384,8 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         draw()
         while True:
             process_cache_results()
+            if any(not handle_command(command) for command in web.poll_commands()):
+                break
             if resized:
                 draw()
             ready, _, _ = select.select([sys.stdin], [], [], 0.1)
@@ -1339,17 +1393,15 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
                 key = os.read(sys.stdin.fileno(), 1)
                 if key == b"\x1b" and select.select([sys.stdin], [], [], 0.03)[0]:
                     key += os.read(sys.stdin.fileno(), 2)
-                if key in (b"q", b"Q"):
+                command = {
+                    b"q": "close", b"Q": "close",
+                    b"j": "next", b"\x1b[B": "next",
+                    b"k": "previous", b"\x1b[A": "previous",
+                    b"r": "reload", b"R": "reload",
+                    b"\r": "reload", b"\n": "reload",
+                }.get(key, "")
+                if command and not handle_command(command):
                     break
-                if key in (b"j", b"\x1b[B") and selected < len(frames) - 1:
-                    selected += 1
-                    show_selected()
-                elif key in (b"k", b"\x1b[A") and selected > 0:
-                    selected -= 1
-                    show_selected()
-                elif key in (b"r", b"R", b"\r", b"\n"):
-                    last_mtime = Path(file_path).stat().st_mtime
-                    request_reload()
             current_mtime = Path(file_path).stat().st_mtime
             if current_mtime != last_mtime:
                 last_mtime = current_mtime
