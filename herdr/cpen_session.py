@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -27,6 +28,7 @@ import uuid
 
 
 PLUGIN_ID = "zerodice0.cpen"
+PLUGIN_VERSION = "0.4.0"
 PEN_MCP = Path(
     "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/"
     "out/mcp-server-darwin-arm64"
@@ -38,6 +40,7 @@ FRAME_QUERY = (
 )
 PEN_FILE_PATTERN = re.compile(r"작업 대상 \.pen 파일: ([^\n]+)")
 PREVIEW_HTML = Path(__file__).with_name("preview.html")
+BINDING_VERSION = 1
 
 
 def context() -> dict:
@@ -45,6 +48,148 @@ def context() -> dict:
         return json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON", "{}"))
     except json.JSONDecodeError:
         return {}
+
+
+def binding_dir() -> Path:
+    explicit = os.environ.get("CPEN_BINDING_DIR", "")
+    if explicit:
+        return Path(explicit)
+    plugin_state = os.environ.get("HERDR_PLUGIN_STATE_DIR", "")
+    if plugin_state:
+        return Path(plugin_state) / "bindings"
+    return shared_binding_dir()
+
+
+def shared_binding_dir() -> Path:
+    cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache / "cpen" / "herdr-bindings"
+
+
+def binding_dirs() -> list[Path]:
+    if os.environ.get("CPEN_BINDING_DIR", ""):
+        return [binding_dir()]
+    roots = [binding_dir(), shared_binding_dir()]
+    return list(dict.fromkeys(roots))
+
+
+def binding_path(pane_id: str, root: Path | None = None) -> Path:
+    key = hashlib.sha256(pane_id.encode()).hexdigest()[:16]
+    return (root or binding_dir()) / f"{key}.json"
+
+
+def read_binding(pane_id: str) -> dict | None:
+    if not pane_id:
+        return None
+    for root in binding_dirs():
+        try:
+            binding = json.loads(binding_path(pane_id, root).read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if (
+            binding.get("version") == BINDING_VERSION
+            and binding.get("pane_id") == pane_id
+            and binding.get("pen_file")
+        ):
+            return binding
+    return None
+
+
+def write_binding(
+    pane_id: str,
+    pen_file: str,
+    preview_pane_id: str | None = None,
+) -> dict:
+    current = read_binding(pane_id) or {}
+    binding = {
+        "version": BINDING_VERSION,
+        "pane_id": pane_id,
+        "pen_file": str(Path(pen_file).resolve()),
+        "preview_pane_id": (
+            current.get("preview_pane_id", "")
+            if preview_pane_id is None
+            else preview_pane_id
+        ),
+        "attached_unix_ms": current.get(
+            "attached_unix_ms", int(time.time() * 1000)
+        ),
+    }
+    root = binding_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".binding-", dir=root)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "w") as output:
+            json.dump(binding, output, ensure_ascii=False)
+            output.write("\n")
+        os.replace(temporary_path, binding_path(pane_id))
+        for alternate in binding_dirs()[1:]:
+            binding_path(pane_id, alternate).unlink(missing_ok=True)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return binding
+
+
+def remove_binding(pane_id: str) -> None:
+    if pane_id:
+        for root in binding_dirs():
+            binding_path(pane_id, root).unlink(missing_ok=True)
+
+
+def bindings() -> list[dict]:
+    found = []
+    seen = set()
+    for root in binding_dirs():
+        for path in root.glob("*.json"):
+            try:
+                binding = json.loads(path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            pane_id = binding.get("pane_id")
+            if (
+                binding.get("version") == BINDING_VERSION
+                and pane_id
+                and pane_id not in seen
+                and binding.get("pen_file")
+            ):
+                seen.add(pane_id)
+                found.append(binding)
+    return found
+
+
+def bindings_for_file(pen_file: str, exclude_pane: str = "") -> list[dict]:
+    target = str(Path(pen_file).resolve())
+    return [
+        binding
+        for binding in bindings()
+        if binding["pen_file"] == target and binding["pane_id"] != exclude_pane
+    ]
+
+
+def binding_for_preview(preview_pane_id: str) -> dict | None:
+    return next(
+        (
+            binding
+            for binding in bindings()
+            if binding.get("preview_pane_id") == preview_pane_id
+        ),
+        None,
+    )
+
+
+def set_binding_preview(pane_id: str, preview_pane_id: str) -> None:
+    binding = read_binding(pane_id)
+    if binding:
+        write_binding(pane_id, binding["pen_file"], preview_pane_id)
+
+
+def move_binding(previous_pane_id: str, pane_id: str) -> None:
+    source = read_binding(previous_pane_id)
+    if source:
+        write_binding(pane_id, source["pen_file"], source.get("preview_pane_id", ""))
+        remove_binding(previous_pane_id)
+    for binding in bindings():
+        if binding.get("preview_pane_id") == previous_pane_id:
+            write_binding(binding["pane_id"], binding["pen_file"], pane_id)
 
 
 def herdr_bin() -> str:
@@ -68,8 +213,14 @@ def pane_run(pane_id: str, command: list[str]) -> None:
     run_cli("pane", "run", pane_id, shlex.join(command))
 
 
-def agent_command(agent: str, pen_file: str, stem: str) -> list[str]:
-    return [
+def agent_command(
+    agent: str,
+    pen_file: str,
+    stem: str,
+    external_occupants: str = "",
+    binding_root: str = "",
+) -> list[str]:
+    command = [
         "fish",
         str(CPEN_RUNNER),
         "-a",
@@ -78,6 +229,14 @@ def agent_command(agent: str, pen_file: str, stem: str) -> list[str]:
         pen_file,
         f"pen:{stem}",
     ]
+    environment = []
+    if external_occupants:
+        environment.append(f"CPEN_EXTERNAL_OCCUPANTS={external_occupants}")
+    if binding_root:
+        environment.append(f"CPEN_BINDING_DIR={binding_root}")
+    if environment:
+        return ["env", *environment, *command]
+    return command
 
 
 def pencil_mcp_command(binary: Path) -> list[str]:
@@ -117,6 +276,23 @@ def open_launcher() -> int:
     return subprocess.run(command).returncode
 
 
+def open_attach_launcher(pane_id: str) -> int:
+    command = [
+        herdr_bin(),
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        PLUGIN_ID,
+        "--entrypoint",
+        "attach",
+        "--target-pane",
+        pane_id,
+        "--focus",
+    ]
+    return subprocess.run(command).returncode
+
+
 def choose(prompt: str, rows: list[str], *, delimiter: bool = False) -> str:
     command = ["fzf", "--reverse", "--height=100%", f"--prompt={prompt}> "]
     if delimiter:
@@ -135,6 +311,18 @@ def find_pen_files(root: str) -> list[str]:
     ]
     paths = subprocess.run(command, text=True, capture_output=True, check=True).stdout.splitlines()
     return [str(Path(item).resolve()) for item in paths]
+
+
+def pen_file_rows(paths: list[str], root: str, exclude_pane: str = "") -> list[str]:
+    rows = []
+    for path in paths:
+        label = os.path.relpath(path, root)
+        occupants = bindings_for_file(path, exclude_pane)
+        if occupants:
+            panes = ", ".join(binding["pane_id"] for binding in occupants)
+            label += f"  ⚠ 연결됨: {panes}"
+        rows.append(f"{path}\t{label}")
+    return rows
 
 
 def open_pen(file_path: str) -> None:
@@ -259,7 +447,7 @@ def stop_preview(pane_id: str) -> None:
     run_cli("pane", "send-text", pane_id, "q")
 
 
-def toggle_preview() -> int:
+def focused_pane_values() -> tuple[str, str]:
     data = context()
     focused_id = str(
         data.get("focused_pane_id") or os.environ.get("HERDR_PANE_ID") or ""
@@ -267,6 +455,13 @@ def toggle_preview() -> int:
     workspace = str(
         data.get("workspace_id") or os.environ.get("HERDR_WORKSPACE_ID") or ""
     )
+    if not workspace and ":" in focused_id:
+        workspace = focused_id.split(":", 1)[0]
+    return focused_id, workspace
+
+
+def toggle_preview() -> int:
+    focused_id, workspace = focused_pane_values()
     if not focused_id or not workspace:
         print("cpen: focused Herdr pane을 확인할 수 없습니다.", file=sys.stderr)
         return 1
@@ -274,7 +469,9 @@ def toggle_preview() -> int:
     preview_id = ""
     try:
         focused_info = pane_process_info(focused_id)
-        if preview_source_from_process_info(focused_info):
+        focused_preview_source = preview_source_from_process_info(focused_info)
+        if focused_preview_source:
+            set_binding_preview(focused_preview_source, "")
             stop_preview(focused_id)
             return 0
 
@@ -286,9 +483,41 @@ def toggle_preview() -> int:
         )
         if not source_pane:
             raise RuntimeError("focused pane 정보를 찾지 못했습니다")
-        pen_file = pen_file_from_pane(source_pane, focused_info)
+
+        binding = read_binding(focused_id)
+        pen_file = str(binding.get("pen_file", "")) if binding else ""
+        if pen_file and not Path(pen_file).is_file():
+            remove_binding(focused_id)
+            binding = None
+            pen_file = ""
         if not pen_file:
-            raise RuntimeError("기존 cpen 에이전트 pane에서 실행하세요")
+            pen_file = pen_file_from_pane(source_pane, focused_info)
+            if pen_file:
+                binding = write_binding(focused_id, pen_file)
+        if not pen_file:
+            return open_attach_launcher(focused_id)
+
+        pane_ids = {
+            str(pane.get("pane_id") or "")
+            for pane in panes
+            if pane.get("pane_id")
+        }
+        bound_preview_id = str(binding.get("preview_pane_id", "")) if binding else ""
+        if bound_preview_id:
+            set_binding_preview(focused_id, "")
+            if bound_preview_id in pane_ids:
+                try:
+                    bound_preview_info = pane_process_info(bound_preview_id)
+                except (subprocess.CalledProcessError, KeyError, json.JSONDecodeError):
+                    bound_preview_info = {}
+                if preview_source_from_process_info(bound_preview_info) == focused_id:
+                    stop_preview(bound_preview_id)
+                    return 0
+                subprocess.run(
+                    [herdr_bin(), "pane", "close", bound_preview_id],
+                    capture_output=True,
+                    check=False,
+                )
 
         for pane in panes:
             if pane.get("tab_id") != source_pane.get("tab_id"):
@@ -301,6 +530,7 @@ def toggle_preview() -> int:
             except (subprocess.CalledProcessError, KeyError, json.JSONDecodeError):
                 continue
             if preview_source_from_process_info(candidate_info) == focused_id:
+                set_binding_preview(focused_id, "")
                 stop_preview(candidate_id)
                 return 0
 
@@ -319,6 +549,7 @@ def toggle_preview() -> int:
         preview_id = split["pane"]["pane_id"]
         run_cli("pane", "rename", preview_id, f"Pencil · {Path(pen_file).stem}")
         start_preview(preview_id, pen_file, focused_id)
+        set_binding_preview(focused_id, preview_id)
         return 0
     except (
         subprocess.CalledProcessError,
@@ -336,6 +567,71 @@ def toggle_preview() -> int:
         return 1
 
 
+def attach_preview() -> int:
+    focused_id, workspace = focused_pane_values()
+    if not focused_id or not workspace:
+        print("cpen: focused Herdr pane을 확인할 수 없습니다.", file=sys.stderr)
+        return 1
+    try:
+        panes = run_json("pane", "list", "--workspace", workspace)["result"][
+            "panes"
+        ]
+        source_pane = next(
+            (pane for pane in panes if pane.get("pane_id") == focused_id), None
+        )
+        if not source_pane:
+            raise RuntimeError("focused pane 정보를 찾지 못했습니다")
+        root = str(source_pane.get("cwd") or os.getcwd())
+        paths = find_pen_files(root)
+        if not paths:
+            raise RuntimeError(f".pen 파일이 없습니다: {root}")
+        picked = choose(
+            "Pencil file",
+            pen_file_rows(paths, root, focused_id),
+            delimiter=True,
+        )
+        if not picked:
+            return 0
+        pen_file = picked.split("\t", 1)[0]
+        previous = read_binding(focused_id)
+        previous_preview = str(previous.get("preview_pane_id", "")) if previous else ""
+        if previous_preview:
+            try:
+                stop_preview(previous_preview)
+            except subprocess.CalledProcessError:
+                pass
+        write_binding(focused_id, pen_file, "")
+        return toggle_preview()
+    except (
+        subprocess.CalledProcessError,
+        KeyError,
+        json.JSONDecodeError,
+        RuntimeError,
+    ) as error:
+        detail = getattr(error, "stderr", "") or str(error)
+        print(f"cpen: Pencil 파일을 연결하지 못했습니다: {detail.strip()}", file=sys.stderr)
+        time.sleep(3)
+        return 1
+
+
+def detach_pane() -> int:
+    focused_id, _workspace = focused_pane_values()
+    if not focused_id:
+        print("cpen: focused Herdr pane을 확인할 수 없습니다.", file=sys.stderr)
+        return 1
+    binding = read_binding(focused_id)
+    if not binding:
+        return 0
+    preview_id = str(binding.get("preview_pane_id", ""))
+    remove_binding(focused_id)
+    if preview_id:
+        try:
+            stop_preview(preview_id)
+        except subprocess.CalledProcessError:
+            pass
+    return 0
+
+
 def launch_session() -> int:
     cwd, workspace = invocation_values()
     if not workspace:
@@ -347,7 +643,7 @@ def launch_session() -> int:
         print(f"cpen: .pen 파일이 없습니다: {cwd}", file=sys.stderr)
         time.sleep(2)
         return 1
-    rows = [f"{path}\t{os.path.relpath(path, cwd)}" for path in paths]
+    rows = pen_file_rows(paths, cwd)
     picked = choose("Pencil file", rows, delimiter=True)
     if not picked:
         return 0
@@ -360,7 +656,11 @@ def launch_session() -> int:
 
     stem = Path(pen_file).stem
     label = f"Pencil · {stem}"
+    external_occupants = ", ".join(
+        binding["pane_id"] for binding in bindings_for_file(pen_file)
+    )
     tab_id = ""
+    left_id = ""
     try:
         created = run_json(
             "tab", "create", "--workspace", workspace, "--cwd", cwd,
@@ -374,8 +674,18 @@ def launch_session() -> int:
         )["result"]
         right_id = split["pane"]["pane_id"]
 
+        write_binding(left_id, pen_file, right_id)
         start_preview(right_id, pen_file)
-        pane_run(left_id, agent_command(agent, pen_file, stem))
+        pane_run(
+            left_id,
+            agent_command(
+                agent,
+                pen_file,
+                stem,
+                external_occupants,
+                str(binding_dir()),
+            ),
+        )
         run_json("tab", "focus", tab_id)
         return 0
     except (
@@ -386,6 +696,8 @@ def launch_session() -> int:
     ) as error:
         detail = getattr(error, "stderr", "") or str(error)
         print(f"cpen: Pencil 탭을 열지 못했습니다: {detail.strip()}", file=sys.stderr)
+        if left_id:
+            remove_binding(left_id)
         if tab_id:
             subprocess.run([herdr_bin(), "tab", "close", tab_id], capture_output=True)
         time.sleep(3)
@@ -405,7 +717,7 @@ class PencilMCP:
         try:
             self.request(
                 "initialize",
-                {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cpen-preview", "version": "0.3.0"}},
+                {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cpen-preview", "version": PLUGIN_VERSION}},
             )
             self.notify("notifications/initialized", {})
             # The desktop socket assigns the client and agent name asynchronously.
@@ -1016,6 +1328,47 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
     return exit_code
 
 
+def event_payload() -> dict:
+    try:
+        return json.loads(os.environ.get("HERDR_PLUGIN_EVENT_JSON", "{}"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def event_pane_id(payload: dict) -> str:
+    pane = payload.get("pane") or {}
+    return str(payload.get("pane_id") or pane.get("pane_id") or "")
+
+
+def handle_plugin_event() -> int:
+    event_name = os.environ.get("HERDR_PLUGIN_EVENT", "")
+    payload = event_payload()
+    if event_name == "pane.closed":
+        pane_id = event_pane_id(payload)
+        if not pane_id:
+            return 0
+        source = read_binding(pane_id)
+        if source:
+            preview_id = str(source.get("preview_pane_id", ""))
+            remove_binding(pane_id)
+            if preview_id and preview_id != pane_id:
+                subprocess.run(
+                    [herdr_bin(), "pane", "close", preview_id],
+                    capture_output=True,
+                    check=False,
+                )
+        preview_source = binding_for_preview(pane_id)
+        if preview_source:
+            set_binding_preview(preview_source["pane_id"], "")
+        return 0
+    if event_name == "pane.moved":
+        previous_pane_id = str(payload.get("previous_pane_id") or "")
+        pane_id = event_pane_id(payload)
+        if previous_pane_id and pane_id and previous_pane_id != pane_id:
+            move_binding(previous_pane_id, pane_id)
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         return 2
@@ -1025,6 +1378,18 @@ def main() -> int:
         return launch_session()
     if sys.argv[1] == "toggle-preview":
         return toggle_preview()
+    if sys.argv[1] == "attach":
+        focused_id, _workspace = focused_pane_values()
+        return open_attach_launcher(focused_id) if focused_id else 1
+    if sys.argv[1] == "attach-preview":
+        return attach_preview()
+    if sys.argv[1] == "detach":
+        return detach_pane()
+    if sys.argv[1] == "event":
+        return handle_plugin_event()
+    if sys.argv[1] == "bind" and len(sys.argv) == 4:
+        write_binding(sys.argv[2], sys.argv[3])
+        return 0
     if sys.argv[1] == "preview" and len(sys.argv) in (3, 4, 5):
         ready_path = sys.argv[3] if len(sys.argv) == 4 else ""
         if len(sys.argv) == 5:

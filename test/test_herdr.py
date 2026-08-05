@@ -81,6 +81,223 @@ class HerdrPreviewTests(unittest.TestCase):
                 str(pen_file.resolve()),
             )
 
+    def test_pane_binding_survives_cleared_process_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            with mock.patch.dict(
+                MODULE.os.environ, {"CPEN_BINDING_DIR": str(root / "bindings")}
+            ):
+                MODULE.write_binding("w1:p2", str(pen_file), "w1:p3")
+                binding = MODULE.read_binding("w1:p2")
+                self.assertEqual(binding["pen_file"], str(pen_file.resolve()))
+                self.assertEqual(binding["preview_pane_id"], "w1:p3")
+                self.assertEqual(MODULE.pen_file_from_process_info({}), "")
+
+    def test_plugin_reads_binding_created_by_standalone_cpen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            with mock.patch.dict(
+                MODULE.os.environ,
+                {"XDG_CACHE_HOME": str(root / "cache")},
+                clear=True,
+            ):
+                MODULE.write_binding("w1:p2", str(pen_file))
+                MODULE.os.environ["HERDR_PLUGIN_STATE_DIR"] = str(root / "plugin")
+                self.assertEqual(
+                    MODULE.read_binding("w1:p2")["pen_file"],
+                    str(pen_file.resolve()),
+                )
+
+    def test_binding_rows_show_all_other_panes_for_same_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            with mock.patch.dict(
+                MODULE.os.environ, {"CPEN_BINDING_DIR": str(root / "bindings")}
+            ):
+                MODULE.write_binding("w1:p2", str(pen_file))
+                MODULE.write_binding("w1:p4", str(pen_file))
+                rows = MODULE.pen_file_rows([str(pen_file)], str(root), "w1:p2")
+                self.assertIn("⚠ 연결됨: w1:p4", rows[0])
+                self.assertNotIn("w1:p2", rows[0])
+
+    def test_moving_pane_moves_source_binding_and_preview_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.pen"
+            second = root / "second.pen"
+            first.touch()
+            second.touch()
+            with mock.patch.dict(
+                MODULE.os.environ, {"CPEN_BINDING_DIR": str(root / "bindings")}
+            ):
+                MODULE.write_binding("w1:p2", str(first), "w1:p3")
+                MODULE.write_binding("w1:p8", str(second), "w1:p2")
+                MODULE.move_binding("w1:p2", "w2:p5")
+                self.assertIsNone(MODULE.read_binding("w1:p2"))
+                self.assertEqual(
+                    MODULE.read_binding("w2:p5")["pen_file"], str(first.resolve())
+                )
+                self.assertEqual(
+                    MODULE.read_binding("w1:p8")["preview_pane_id"], "w2:p5"
+                )
+
+    def test_closed_preview_clears_source_binding_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            environment = {
+                "CPEN_BINDING_DIR": str(root / "bindings"),
+                "HERDR_PLUGIN_EVENT": "pane.closed",
+                "HERDR_PLUGIN_EVENT_JSON": json.dumps({"pane_id": "w1:p3"}),
+            }
+            with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+                MODULE.write_binding("w1:p2", str(pen_file), "w1:p3")
+                self.assertEqual(MODULE.handle_plugin_event(), 0)
+                self.assertEqual(
+                    MODULE.read_binding("w1:p2")["preview_pane_id"], ""
+                )
+
+    def test_closed_source_removes_binding_and_closes_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            environment = {
+                "CPEN_BINDING_DIR": str(root / "bindings"),
+                "HERDR_PLUGIN_EVENT": "pane.closed",
+                "HERDR_PLUGIN_EVENT_JSON": json.dumps({"pane_id": "w1:p2"}),
+            }
+            completed = mock.Mock(returncode=0)
+            with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+                MODULE.write_binding("w1:p2", str(pen_file), "w1:p3")
+                with mock.patch.object(
+                    MODULE.subprocess, "run", return_value=completed
+                ) as run:
+                    self.assertEqual(MODULE.handle_plugin_event(), 0)
+                self.assertIsNone(MODULE.read_binding("w1:p2"))
+            self.assertEqual(
+                run.call_args.args[0][-3:], ["pane", "close", "w1:p3"]
+            )
+
+    def test_unbound_pane_opens_attach_popup_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "CPEN_BINDING_DIR": str(Path(directory) / "bindings"),
+                "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(
+                    {"focused_pane_id": "w1:p2", "workspace_id": "w1"}
+                ),
+            }
+            pane_list = {
+                "result": {
+                    "panes": [
+                        {"pane_id": "w1:p2", "tab_id": "w1:t1", "cwd": directory}
+                    ]
+                }
+            }
+            with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+                with mock.patch.object(MODULE, "pane_process_info", return_value={}):
+                    with mock.patch.object(MODULE, "run_json", return_value=pane_list):
+                        with mock.patch.object(
+                            MODULE, "open_attach_launcher", return_value=0
+                        ) as launcher:
+                            self.assertEqual(MODULE.toggle_preview(), 0)
+            launcher.assert_called_once_with("w1:p2")
+
+    def test_cleared_pane_uses_persisted_binding_without_picker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            environment = {
+                "CPEN_BINDING_DIR": str(root / "bindings"),
+                "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(
+                    {"focused_pane_id": "w1:p2", "workspace_id": "w1"}
+                ),
+            }
+            pane_list = {
+                "result": {
+                    "panes": [
+                        {"pane_id": "w1:p2", "tab_id": "w1:t1", "cwd": directory}
+                    ]
+                }
+            }
+            split = {"result": {"pane": {"pane_id": "w1:p3"}}}
+
+            def run_json(*args):
+                return pane_list if args[1] == "list" else split
+
+            with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+                MODULE.write_binding("w1:p2", str(pen_file))
+                with mock.patch.object(MODULE, "pane_process_info", return_value={}):
+                    with mock.patch.object(MODULE, "run_json", side_effect=run_json):
+                        with mock.patch.object(MODULE, "run_cli"):
+                            with mock.patch.object(MODULE, "start_preview") as preview:
+                                with mock.patch.object(
+                                    MODULE, "open_attach_launcher"
+                                ) as launcher:
+                                    self.assertEqual(MODULE.toggle_preview(), 0)
+                launcher.assert_not_called()
+                preview.assert_called_once_with(
+                    "w1:p3", str(pen_file.resolve()), "w1:p2"
+                )
+                self.assertEqual(
+                    MODULE.read_binding("w1:p2")["preview_pane_id"], "w1:p3"
+                )
+
+    def test_restored_stale_preview_pane_is_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            environment = {
+                "CPEN_BINDING_DIR": str(root / "bindings"),
+                "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(
+                    {"focused_pane_id": "w1:p2", "workspace_id": "w1"}
+                ),
+            }
+            pane_list = {
+                "result": {
+                    "panes": [
+                        {"pane_id": "w1:p2", "tab_id": "w1:t1", "cwd": directory},
+                        {"pane_id": "w1:p3", "tab_id": "w1:t1", "cwd": directory},
+                    ]
+                }
+            }
+            split = {"result": {"pane": {"pane_id": "w1:p4"}}}
+
+            def run_json(*args):
+                return pane_list if args[1] == "list" else split
+
+            with mock.patch.dict(MODULE.os.environ, environment, clear=False):
+                MODULE.write_binding("w1:p2", str(pen_file), "w1:p3")
+                with mock.patch.object(MODULE, "pane_process_info", return_value={}):
+                    with mock.patch.object(MODULE, "run_json", side_effect=run_json):
+                        with mock.patch.object(MODULE, "run_cli"):
+                            with mock.patch.object(MODULE, "start_preview") as preview:
+                                with mock.patch.object(
+                                    MODULE.subprocess,
+                                    "run",
+                                    return_value=mock.Mock(returncode=0),
+                                ) as run:
+                                    self.assertEqual(MODULE.toggle_preview(), 0)
+                self.assertIn(
+                    [MODULE.herdr_bin(), "pane", "close", "w1:p3"],
+                    [call.args[0] for call in run.call_args_list],
+                )
+                preview.assert_called_once_with(
+                    "w1:p4", str(pen_file.resolve()), "w1:p2"
+                )
+                self.assertEqual(
+                    MODULE.read_binding("w1:p2")["preview_pane_id"], "w1:p4"
+                )
+
     def test_process_info_extracts_attached_preview_source(self):
         info = {
             "foreground_processes": [
@@ -143,6 +360,13 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertEqual(command[1], str(MODULE.CPEN_RUNNER))
         self.assertNotIn("-lc", command)
         self.assertEqual(command[-4:], ["codex", "--file", "/tmp/a b.pen", "pen:a b"])
+
+    def test_agent_command_passes_external_binding_occupants(self):
+        command = MODULE.agent_command(
+            "codex", "/tmp/a.pen", "a", "w1:p2, w1:p4"
+        )
+        self.assertEqual(command[:2], ["env", "CPEN_EXTERNAL_OCCUPANTS=w1:p2, w1:p4"])
+        self.assertEqual(command[2], "fish")
 
     def test_pencil_mcp_uses_unique_preview_agent_without_conversation_id(self):
         first = MODULE.pencil_mcp_command(Path("/tmp/mcp"))

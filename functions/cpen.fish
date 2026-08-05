@@ -138,11 +138,33 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
             set holds_lease 0
     end
 
+    if test -n "$CPEN_EXTERNAL_OCCUPANTS"
+        set -l had_concurrent (count $concurrent_prompt)
+        echo "cpen: $pen_file 에 연결된 Herdr pane이 있습니다: $CPEN_EXTERNAL_OCCUPANTS" >&2
+        set -a concurrent_prompt \
+            "현재 같은 파일에 연결된 Herdr pane이 있습니다: $CPEN_EXTERNAL_OCCUPANTS. 다른 세션의 변경을 덮어쓰거나 되돌리지 마세요."
+        if test $had_concurrent -eq 0
+            set -a concurrent_prompt \
+                "수정 직전에 대상 노드를 다시 읽고, 기억한 상태와 다르면 최신 상태를 기준으로 작업하세요." \
+                "한 번의 execute 범위를 작게 유지하고, 충돌이 의심되면 재시도보다 사용자에게 현재 상태를 보고하세요."
+        end
+    end
+
     if not set -q CPEN_SKIP_OPEN
         if not open -a Pen "$pen_file"
             echo "cpen: Pen.app 으로 파일을 열지 못했습니다: $pen_file" >&2
             test $holds_lease -eq 1; and _cpen_lease release $pen_file $token
             return 1
+        end
+    end
+
+    if test -n "$HERDR_PANE_ID"; and command -q python3
+        set -l function_file (functions --details cpen)
+        set -l binding_script \
+            (path resolve (path dirname "$function_file")/../herdr/cpen_session.py)
+        if test -f "$binding_script"
+            python3 "$binding_script" bind "$HERDR_PANE_ID" "$pen_file" \
+                >/dev/null 2>&1
         end
     end
 

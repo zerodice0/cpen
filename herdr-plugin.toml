@@ -1,6 +1,6 @@
 id = "zerodice0.cpen"
 name = "cpen Pencil Session"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.7.5"
 description = "Open a 2:1 agent and live Pencil preview tab."
 platforms = ["macos"]
@@ -15,9 +15,31 @@ command = ["python3", "herdr/cpen_session.py", "open"]
 [[actions]]
 id = "toggle-preview"
 title = "Toggle Pencil Preview"
-description = "Attach or detach a preview beside the focused cpen pane."
+description = "Attach a .pen file if needed, then toggle its preview."
 contexts = ["pane"]
 command = ["python3", "herdr/cpen_session.py", "toggle-preview"]
+
+[[actions]]
+id = "attach"
+title = "Attach Pencil File"
+description = "Attach or replace the .pen file bound to the focused pane."
+contexts = ["pane"]
+command = ["python3", "herdr/cpen_session.py", "attach"]
+
+[[actions]]
+id = "detach"
+title = "Detach Pencil File"
+description = "Remove the .pen binding and preview from the focused pane."
+contexts = ["pane"]
+command = ["python3", "herdr/cpen_session.py", "detach"]
+
+[[events]]
+on = "pane.closed"
+command = ["python3", "herdr/cpen_session.py", "event"]
+
+[[events]]
+on = "pane.moved"
+command = ["python3", "herdr/cpen_session.py", "event"]
 
 [[panes]]
 id = "launcher"
@@ -26,3 +48,11 @@ placement = "popup"
 width = 92
 height = 30
 command = ["python3", "herdr/cpen_session.py", "launcher"]
+
+[[panes]]
+id = "attach"
+title = "Attach Pencil File"
+placement = "popup"
+width = 92
+height = 30
+command = ["python3", "herdr/cpen_session.py", "attach-preview"]
