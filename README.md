@@ -73,25 +73,35 @@ set -Ux CPEN_AGENT claude     # 기본 에이전트 고정 (선택 단계가 사
 `herdr-plugin.toml` 은 선택한 `.pen` 파일을 하나의 Herdr 탭으로 연다.
 
 - 왼쪽 2/3: 기존 `cpen`으로 시작한 Codex 또는 Claude
-- 오른쪽 1/3: 최상위 Pencil 프레임 이미지와 프레임 선택 목록
+- 오른쪽 1/3: 고해상도 브라우저 주소와 프레임 선택 목록
 - 파일이 저장되어 mtime이 바뀌면 선택 프레임을 자동 갱신
-- Pen MCP가 2배 PNG를 임시 경로에 export하고, 읽은 즉시 삭제한 뒤 Herdr 그래픽
-  레이어에 전달한다. preview 종료 시 임시 디렉터리도 정리한다.
+- Pen MCP가 2배 PNG를 임시 경로에 export하고, 읽은 즉시 삭제한 뒤 메모리의 PNG를
+  브라우저에 제공한다. preview 종료 시 HTTP 서버와 임시 디렉터리도 정리한다.
 
-Herdr 0.7.5 이상과 Kitty graphics를 지원하는 외부 터미널(예: Ghostty)이 필요하다.
-현재 iTerm2에서는 Herdr가 이미지 셀 크기를 얻지 못하므로 우측 이미지가 표시되지 않는다.
-플러그인을 연결하고 Herdr 설정의 `[experimental]`에 `kitty_graphics = true`를 켠다.
+Herdr 0.7.5 이상이 필요하다. Tailscale이 실행 중이면 해당 인터페이스의 임시 포트에만
+서버를 열고 토큰이 포함된 URL을 표시한다. 같은 tailnet의 브라우저에서 URL을 열면
+원본 비율의 이미지를 Fit 또는 100%로 볼 수 있다. Tailscale을 찾지 못하면 localhost
+주소와 SSH 터널 명령을 대신 표시한다.
 
 ```sh
 herdr plugin link /absolute/path/to/cpen
 ```
 
 설정된 단축키나 Herdr plugin action에서 `Open Pencil Session`을 실행한 뒤 파일과
-에이전트를 고른다. 우측 미리보기에서는 `j/k` 또는 방향키로 프레임을 바꾸고,
-`r`로 다시 읽으며, `q`로 미리보기를 종료한다. 같은 방식으로 탭을 여러 개 열 수 있다.
+에이전트를 고른다. 우측 pane의 `미리보기 열기` 링크를 Ctrl-click하거나 함께 표시된
+URL을 브라우저에 붙여 넣는다. `j/k` 또는 방향키로 프레임을 바꾸고, `r`로 다시 읽으며,
+`q`로 미리보기를 종료한다. 브라우저는 선택된 프레임이 바뀌면 자동 갱신된다. 같은
+방식으로 탭을 여러 개 열 수 있고 각 preview는 서로 다른 포트와 토큰을 사용한다.
 이 시스템의 설정에서는 Ghostty에서 `herdr`를 실행하고 `Ctrl+P`, `p`를 차례로 누른다.
 선택한 문서에 preview agent를 연결하는 동안 Pen이 잠깐 앞으로 오며, 연결과 첫 이미지
 준비가 끝나면 원래 터미널 앱으로 자동 복귀한다.
+
+이미 `cpen`으로 실행 중인 Codex/Claude pane에는 미리보기만 붙일 수 있다. 대상 pane에
+포커스를 두고 `Toggle Pencil Preview`를 실행한다. 이 시스템에서는 `Ctrl+P`, `i`를
+차례로 누른다. 대상 pane의 오른쪽 1/3이 미리보기가 되며, 작은 2x2 레이아웃에서는
+선택 중인 프레임 한 줄만 표시하는 compact UI를 쓴다. 같은 단축키를 다시 누르거나
+미리보기에서 `q`를 누르면 미리보기만 닫히고 기존 에이전트 세션과 레이아웃은 유지된다.
+각 cpen pane별로 하나씩 독립적으로 붙일 수 있다.
 
 초기 프로토타입은 기존 `.pen` 선택만 지원한다. 새 문서 생성은 Pen.app에서 저장한 뒤
 선택하는 흐름으로 둔다.

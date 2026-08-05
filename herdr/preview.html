@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pencil preview</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b0d12; color: #e6e9f2; }
+    header {
+      position: sticky; top: 0; z-index: 1; display: flex; gap: 16px;
+      align-items: center; padding: 12px 16px; background: #151923;
+      border-bottom: 1px solid #2b3242;
+    }
+    .titles { min-width: 0; flex: 1; }
+    #file { font-size: 13px; color: #8e98ad; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #frame { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button {
+      border: 1px solid #3a4357; border-radius: 7px; padding: 7px 11px;
+      color: #dfe5f2; background: #222838; cursor: pointer;
+    }
+    button.active { color: white; border-color: #638cff; background: #315fda; }
+    main {
+      height: calc(100vh - 62px); display: flex; align-items: center;
+      justify-content: center; overflow: auto; padding: 24px;
+    }
+    img { display: block; image-rendering: auto; box-shadow: 0 18px 60px #0009; }
+    main.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    main.actual { display: block; }
+    main.actual img { max-width: none; max-height: none; margin: 0 auto; }
+    #loading { color: #8e98ad; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="titles">
+      <div id="file">Pencil preview</div>
+      <div id="frame">Connecting…</div>
+    </div>
+    <button id="fit" class="active" type="button">Fit</button>
+    <button id="actual" type="button">100%</button>
+  </header>
+  <main id="stage" class="fit">
+    <div id="loading">Waiting for the first frame…</div>
+    <img id="preview" alt="Pencil frame" hidden>
+  </main>
+  <script>
+    const stage = document.getElementById('stage');
+    const image = document.getElementById('preview');
+    const loading = document.getElementById('loading');
+    const fit = document.getElementById('fit');
+    const actual = document.getElementById('actual');
+    let revision = -1;
+
+    function setMode(mode) {
+      stage.className = mode;
+      fit.classList.toggle('active', mode === 'fit');
+      actual.classList.toggle('active', mode === 'actual');
+    }
+    fit.onclick = () => setMode('fit');
+    actual.onclick = () => setMode('actual');
+    image.onclick = () => setMode(stage.className === 'fit' ? 'actual' : 'fit');
+
+    async function refresh() {
+      try {
+        const response = await fetch('state.json', { cache: 'no-store' });
+        const state = await response.json();
+        document.getElementById('file').textContent = state.file;
+        document.getElementById('frame').textContent = state.frame || 'Loading…';
+        document.title = `${state.frame || 'Pencil'} · preview`;
+        if (state.ready && state.revision !== revision) {
+          revision = state.revision;
+          image.onload = () => { loading.hidden = true; image.hidden = false; };
+          image.src = `frame.png?v=${revision}`;
+        }
+      } catch (_) {
+        document.getElementById('frame').textContent = 'Preview disconnected';
+      }
+    }
+    refresh();
+    setInterval(refresh, 750);
+  </script>
+</body>
+</html>

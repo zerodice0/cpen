@@ -4,21 +4,24 @@
 from __future__ import annotations
 
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shlex
 import shutil
 import signal
 import socket
-import struct
 import subprocess
 import sys
 import termios
 import tempfile
+import threading
 import time
 import tty
+from urllib.parse import urlparse
 import uuid
 
 
@@ -32,6 +35,8 @@ FRAME_QUERY = (
     'Get(document,(n,c)=>c.depth===0 && n.type==="frame" && !n.reusable '
     '&& Print(JSON.stringify({id:n.id,name:n.name||"Untitled"})))'
 )
+PEN_FILE_PATTERN = re.compile(r"작업 대상 \.pen 파일: ([^\n]+)")
+PREVIEW_HTML = Path(__file__).with_name("preview.html")
 
 
 def context() -> dict:
@@ -177,6 +182,159 @@ def wait_for_ready(path: Path, timeout: float = 22) -> bool:
     return False
 
 
+def start_preview(pane_id: str, pen_file: str, source_pane: str = "") -> None:
+    script = str(Path(__file__).resolve())
+    ready_path = Path(tempfile.gettempdir()) / f"cpen-preview-{uuid.uuid4()}.ready"
+    previous_bundle = frontmost_bundle_id()
+    try:
+        open_pen(pen_file)
+        time.sleep(0.75)
+        command = [sys.executable, script, "preview", pen_file, str(ready_path)]
+        if source_pane:
+            command.append(source_pane)
+        pane_run(pane_id, command)
+        if not wait_for_ready(ready_path):
+            raise RuntimeError("Pencil preview 연결 시간이 초과됐습니다")
+    finally:
+        activate_bundle(previous_bundle)
+        ready_path.unlink(missing_ok=True)
+
+
+def pane_process_info(pane_id: str) -> dict:
+    return run_json("pane", "process-info", "--pane", pane_id)["result"][
+        "process_info"
+    ]
+
+
+def pen_file_from_process_info(process_info: dict) -> str:
+    for process in process_info.get("foreground_processes", []):
+        values = [process.get("cmdline", ""), *(process.get("argv") or [])]
+        for value in values:
+            match = PEN_FILE_PATTERN.search(str(value))
+            if match:
+                return str(Path(match.group(1)).resolve())
+    return ""
+
+
+def pen_file_from_lease(session_label: str, lease_dir: Path | None = None) -> str:
+    if not session_label:
+        return ""
+    root = lease_dir or Path(
+        os.environ.get("CPEN_LEASE_DIR")
+        or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        / "cpen"
+        / "leases"
+    )
+    matches: list[tuple[float, str]] = []
+    for info_path in root.glob("*.d/info"):
+        try:
+            fields = info_path.read_text().rstrip("\n").split("\t")
+            pen_file = str(Path(fields[0]).resolve())
+            if len(fields) >= 4 and fields[3] == session_label and Path(pen_file).is_file():
+                matches.append((info_path.stat().st_mtime, pen_file))
+        except (IndexError, OSError):
+            continue
+    return max(matches, default=(0, ""))[1]
+
+
+def pen_file_from_pane(pane: dict, process_info: dict) -> str:
+    return pen_file_from_process_info(process_info) or pen_file_from_lease(
+        str(pane.get("terminal_title_stripped") or "")
+    )
+
+
+def preview_source_from_process_info(process_info: dict) -> str:
+    for process in process_info.get("foreground_processes", []):
+        argv = process.get("argv") or []
+        if "preview" not in argv:
+            continue
+        index = argv.index("preview")
+        if len(argv) > index + 3:
+            return str(argv[index + 3])
+    return ""
+
+
+def stop_preview(pane_id: str) -> None:
+    run_cli("pane", "send-text", pane_id, "q")
+
+
+def toggle_preview() -> int:
+    data = context()
+    focused_id = str(
+        data.get("focused_pane_id") or os.environ.get("HERDR_PANE_ID") or ""
+    )
+    workspace = str(
+        data.get("workspace_id") or os.environ.get("HERDR_WORKSPACE_ID") or ""
+    )
+    if not focused_id or not workspace:
+        print("cpen: focused Herdr pane을 확인할 수 없습니다.", file=sys.stderr)
+        return 1
+
+    preview_id = ""
+    try:
+        focused_info = pane_process_info(focused_id)
+        if preview_source_from_process_info(focused_info):
+            stop_preview(focused_id)
+            return 0
+
+        panes = run_json("pane", "list", "--workspace", workspace)["result"][
+            "panes"
+        ]
+        source_pane = next(
+            (pane for pane in panes if pane.get("pane_id") == focused_id), None
+        )
+        if not source_pane:
+            raise RuntimeError("focused pane 정보를 찾지 못했습니다")
+        pen_file = pen_file_from_pane(source_pane, focused_info)
+        if not pen_file:
+            raise RuntimeError("기존 cpen 에이전트 pane에서 실행하세요")
+
+        for pane in panes:
+            if pane.get("tab_id") != source_pane.get("tab_id"):
+                continue
+            candidate_id = str(pane.get("pane_id") or "")
+            if not candidate_id or candidate_id == focused_id:
+                continue
+            try:
+                candidate_info = pane_process_info(candidate_id)
+            except (subprocess.CalledProcessError, KeyError, json.JSONDecodeError):
+                continue
+            if preview_source_from_process_info(candidate_info) == focused_id:
+                stop_preview(candidate_id)
+                return 0
+
+        split = run_json(
+            "pane",
+            "split",
+            focused_id,
+            "--direction",
+            "right",
+            "--ratio",
+            "0.6666667",
+            "--cwd",
+            str(source_pane.get("cwd") or Path(pen_file).parent),
+            "--no-focus",
+        )["result"]
+        preview_id = split["pane"]["pane_id"]
+        run_cli("pane", "rename", preview_id, f"Pencil · {Path(pen_file).stem}")
+        start_preview(preview_id, pen_file, focused_id)
+        return 0
+    except (
+        subprocess.CalledProcessError,
+        KeyError,
+        json.JSONDecodeError,
+        RuntimeError,
+    ) as error:
+        if preview_id:
+            subprocess.run(
+                [herdr_bin(), "pane", "close", preview_id], capture_output=True
+            )
+        detail = getattr(error, "stderr", "") or str(error)
+        print(f"cpen: 미리보기를 전환하지 못했습니다: {detail.strip()}", file=sys.stderr)
+        time.sleep(3)
+        return 1
+
+
 def launch_session() -> int:
     cwd, workspace = invocation_values()
     if not workspace:
@@ -215,21 +373,7 @@ def launch_session() -> int:
         )["result"]
         right_id = split["pane"]["pane_id"]
 
-        script = str(Path(__file__).resolve())
-        ready_path = Path(tempfile.gettempdir()) / f"cpen-preview-{uuid.uuid4()}.ready"
-        previous_bundle = frontmost_bundle_id()
-        try:
-            open_pen(pen_file)
-            time.sleep(0.75)
-            pane_run(
-                right_id,
-                [sys.executable, script, "preview", pen_file, str(ready_path)],
-            )
-            if not wait_for_ready(ready_path):
-                raise RuntimeError("Pencil preview 연결 시간이 초과됐습니다")
-        finally:
-            activate_bundle(previous_bundle)
-            ready_path.unlink(missing_ok=True)
+        start_preview(right_id, pen_file)
         pane_run(left_id, agent_command(agent, pen_file, stem))
         run_json("tab", "focus", tab_id)
         return 0
@@ -260,7 +404,7 @@ class PencilMCP:
         try:
             self.request(
                 "initialize",
-                {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cpen-preview", "version": "0.1.0"}},
+                {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cpen-preview", "version": "0.3.0"}},
             )
             self.notify("notifications/initialized", {})
             # The desktop socket assigns the client and agent name asynchronously.
@@ -366,39 +510,182 @@ def herdr_request(method: str, params: dict) -> dict:
     return message.get("result", {})
 
 
-def png_size(data_base64: str) -> tuple[int, int]:
-    header = base64.b64decode(data_base64[:40])
-    if header[:8] != b"\x89PNG\r\n\x1a\n":
-        raise RuntimeError("유효한 PNG가 아닙니다")
-    return struct.unpack(">II", header[16:24])
+def tailscale_identity() -> tuple[str, str] | None:
+    explicit_bind = os.environ.get("CPEN_PREVIEW_BIND", "")
+    if explicit_bind:
+        return explicit_bind, os.environ.get("CPEN_PREVIEW_HOST", explicit_bind)
+
+    binary = shutil.which("tailscale")
+    if not binary:
+        return None
+    try:
+        result = subprocess.run(
+            [binary, "status", "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=3,
+        )
+        if result.returncode != 0:
+            return None
+        status = json.loads(result.stdout)
+        if status.get("BackendState") != "Running":
+            return None
+        self_status = status.get("Self") or {}
+        address = next(
+            (
+                item
+                for item in self_status.get("TailscaleIPs", [])
+                if str(item).startswith("100.")
+            ),
+            "",
+        )
+        if not address:
+            return None
+        dns_name = str(self_status.get("DNSName") or address).rstrip(".")
+        return address, dns_name
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+        return None
 
 
-def fit_grid(
-    image_width: int,
-    image_height: int,
-    max_cols: int,
-    max_rows: int,
-    cell_width: int,
-    cell_height: int,
-) -> tuple[int, int]:
-    max_cols = min(max_cols, max(1, image_width // cell_width))
-    max_rows = min(max_rows, max(1, image_height // cell_height))
-    cols_at_max_height = round(
-        max_rows * cell_height * image_width / image_height / cell_width
-    )
-    if cols_at_max_height <= max_cols:
-        return max(1, cols_at_max_height), max_rows
-    rows_at_max_width = round(
-        max_cols * cell_width * image_height / image_width / cell_height
-    )
-    return max_cols, max(1, min(max_rows, rows_at_max_width))
+class PreviewWebServer:
+    def __init__(self, file_path: str) -> None:
+        self.file_name = Path(file_path).name
+        self.frame_name = ""
+        self.png = b""
+        self.revision = 0
+        self.token = uuid.uuid4().hex
+        self.lock = threading.Lock()
+        self.server = None
+        self.thread = None
+        self.url = ""
+        self.network = ""
+        self.tunnel_command = ""
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        preview = self
+        root = f"/cpen/{self.token}"
+
+        class Handler(BaseHTTPRequestHandler):
+            def send_bytes(self, status: int, content_type: str, data: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self) -> None:
+                path = urlparse(self.path).path
+                if path in (root, root + "/"):
+                    self.send_bytes(
+                        200, "text/html; charset=utf-8", PREVIEW_HTML.read_bytes()
+                    )
+                    return
+                if path == root + "/state.json":
+                    with preview.lock:
+                        payload = {
+                            "file": preview.file_name,
+                            "frame": preview.frame_name,
+                            "revision": preview.revision,
+                            "ready": bool(preview.png),
+                        }
+                    self.send_bytes(
+                        200,
+                        "application/json; charset=utf-8",
+                        json.dumps(payload, ensure_ascii=False).encode(),
+                    )
+                    return
+                if path == root + "/frame.png":
+                    with preview.lock:
+                        png = preview.png
+                    if not png:
+                        self.send_bytes(503, "text/plain; charset=utf-8", b"loading")
+                    else:
+                        self.send_bytes(200, "image/png", png)
+                    return
+                self.send_bytes(404, "text/plain; charset=utf-8", b"not found")
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                pass
+
+        return Handler
+
+    def start(self) -> None:
+        identity = tailscale_identity()
+        candidates = []
+        if identity:
+            candidates.append((*identity, "tailscale"))
+        candidates.append(("127.0.0.1", "127.0.0.1", "localhost"))
+
+        last_error = None
+        for bind_host, display_host, network in candidates:
+            try:
+                self.server = ThreadingHTTPServer(
+                    (bind_host, 0), self._handler()
+                )
+                self.server.daemon_threads = True
+                port = self.server.server_address[1]
+                root = f"/cpen/{self.token}/"
+                self.url = f"http://{display_host}:{port}{root}"
+                self.network = network
+                if network == "localhost":
+                    self.tunnel_command = (
+                        f"ssh -N -L {port}:127.0.0.1:{port} <SSH_HOST>"
+                    )
+                self.thread = threading.Thread(
+                    target=self.server.serve_forever,
+                    name="cpen-browser-preview",
+                    daemon=True,
+                )
+                self.thread.start()
+                return
+            except OSError as error:
+                last_error = error
+        raise RuntimeError(f"브라우저 preview 서버를 열지 못했습니다: {last_error}")
+
+    def update(self, data_base64: str, frame_name: str) -> None:
+        with self.lock:
+            self.png = base64.b64decode(data_base64)
+            self.frame_name = frame_name
+            self.revision += 1
+
+    def close(self) -> None:
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+        if self.thread:
+            self.thread.join(timeout=2)
 
 
-def preview(file_path: str, ready_path: str = "") -> int:
+def compact_preview(columns: int, lines: int) -> bool:
+    return columns < 40 or lines < 32
+
+
+def clipped(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return text[: max(1, width - 1)] + "…"
+
+
+def preview_access_text(url: str) -> str:
+    link = f"\x1b]8;;{url}\x1b\\\x1b[4;36m미리보기 열기\x1b[0m\x1b]8;;\x1b\\"
+    return f"{link}\n{url}"
+
+
+def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
     pane_id = os.environ.get("HERDR_PANE_ID", "")
     if not pane_id or not sys.stdin.isatty():
         print("cpen: Herdr pane에서 실행해야 합니다", file=sys.stderr)
         return 1
+
+    ready_signaled = False
+    if source_pane:
+        print(f"Pencil preview 연결 중 · {Path(file_path).name}")
+        if ready_path:
+            Path(ready_path).touch()
+            ready_signaled = True
 
     mcp = None
     for _ in range(12):
@@ -409,17 +696,21 @@ def preview(file_path: str, ready_path: str = "") -> int:
             time.sleep(0.5)
     if not mcp:
         print("cpen: Pen.app MCP에 연결하지 못했습니다. Pen.app을 확인하세요.")
+        if source_pane:
+            time.sleep(4)
+            subprocess.run(
+                [herdr_bin(), "pane", "close", pane_id], capture_output=True
+            )
         return 1
 
     selected = 0
     frames: list[dict] = []
     current_png = ""
+    web = PreviewWebServer(file_path)
     export_dir = tempfile.TemporaryDirectory(prefix="cpen-preview-")
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     resized = True
     last_mtime = 0.0
-    cell_width = 1
-    cell_height = 1
 
     def on_resize(_signum: int, _frame: object) -> None:
         nonlocal resized
@@ -428,40 +719,29 @@ def preview(file_path: str, ready_path: str = "") -> int:
     def draw() -> None:
         nonlocal resized
         size = shutil.get_terminal_size((40, 20))
-        menu_rows = min(max(len(frames) + 3, 5), 9)
-        image_rows = max(1, size.lines - menu_rows)
+        compact = compact_preview(size.columns, size.lines)
+        menu_rows = 3 if compact else min(max(len(frames) + 3, 5), 9)
         sys.stdout.write("\x1b[2J\x1b[H")
-        sys.stdout.write(f"Pencil preview · {Path(file_path).name}\n")
-        sys.stdout.write(f"\x1b[{image_rows + 1};1H")
+        title = f"Pencil browser preview · {Path(file_path).name}"
+        sys.stdout.write(f"{clipped(title, size.columns)}\n")
+        sys.stdout.write(f"{preview_access_text(web.url)}\n")
+        if web.tunnel_command:
+            sys.stdout.write(f"{web.tunnel_command}\n")
         sys.stdout.write(f"{'─' * max(1, size.columns - 1)}\n")
-        visible = frames[max(0, selected - 2): max(0, selected - 2) + menu_rows - 3]
-        start = max(0, selected - 2)
-        for offset, frame in enumerate(visible):
-            marker = "›" if start + offset == selected else " "
-            sys.stdout.write(f"{marker} {frame['name']}\n")
-        sys.stdout.write("↑/↓ or j/k: frame  r: reload  q: close")
+        if compact:
+            name = frames[selected]["name"] if frames else ""
+            sys.stdout.write(f"› {clipped(name, max(1, size.columns - 2))}\n")
+            sys.stdout.write("j/k frame  r reload  q close")
+        else:
+            visible = frames[
+                max(0, selected - 2): max(0, selected - 2) + menu_rows - 3
+            ]
+            start = max(0, selected - 2)
+            for offset, frame in enumerate(visible):
+                marker = "›" if start + offset == selected else " "
+                sys.stdout.write(f"{marker} {frame['name']}\n")
+            sys.stdout.write("↑/↓ or j/k: frame  r: reload  q: close")
         sys.stdout.flush()
-        if current_png:
-            width, height = png_size(current_png)
-            grid_cols, grid_rows = fit_grid(
-                width,
-                height,
-                size.columns,
-                max(1, image_rows - 1),
-                cell_width,
-                cell_height,
-            )
-            herdr_request(
-                "pane.graphics.set",
-                {"pane_id": pane_id, "format": "png", "image_width": width, "image_height": height,
-                 "data_base64": current_png,
-                 "placement": {
-                     "viewport_col": max(0, (size.columns - grid_cols) // 2),
-                     "viewport_row": 1,
-                     "grid_cols": grid_cols,
-                     "grid_rows": grid_rows,
-                 }},
-            )
         resized = False
 
     def reload_frames() -> None:
@@ -474,24 +754,17 @@ def preview(file_path: str, ready_path: str = "") -> int:
         current_png = mcp.export_png(
             file_path, frames[selected]["id"], export_dir.name
         )
+        web.update(current_png, frames[selected]["name"])
         last_mtime = Path(file_path).stat().st_mtime
 
     signal.signal(signal.SIGWINCH, on_resize)
+    exit_code = 0
     try:
-        try:
-            graphics_info = herdr_request("pane.graphics.info", {"pane_id": pane_id})
-            cell_width = graphics_info["cell_width_px"]
-            cell_height = graphics_info["cell_height_px"]
-        except RuntimeError as error:
-            if "host cell size" in str(error):
-                raise RuntimeError(
-                    "이미지 미리보기는 Ghostty에서 Herdr를 실행해야 합니다 "
-                    "(현재 iTerm2 클라이언트는 Kitty graphics 미지원)."
-                ) from error
-            raise
+        web.start()
         reload_frames()
-        if ready_path:
+        if ready_path and not ready_signaled:
             Path(ready_path).touch()
+            ready_signaled = True
         tty.setcbreak(sys.stdin.fileno())
         draw()
         while True:
@@ -509,12 +782,14 @@ def preview(file_path: str, ready_path: str = "") -> int:
                     current_png = mcp.export_png(
                         file_path, frames[selected]["id"], export_dir.name
                     )
+                    web.update(current_png, frames[selected]["name"])
                     draw()
                 elif key in (b"k", b"\x1b[A") and selected > 0:
                     selected -= 1
                     current_png = mcp.export_png(
                         file_path, frames[selected]["id"], export_dir.name
                     )
+                    web.update(current_png, frames[selected]["name"])
                     draw()
                 elif key in (b"r", b"R", b"\r", b"\n"):
                     reload_frames()
@@ -526,16 +801,17 @@ def preview(file_path: str, ready_path: str = "") -> int:
         sys.stdout.write(f"\x1b[2J\x1b[Hcpen preview 오류\n\n{error}\n")
         sys.stdout.flush()
         time.sleep(4)
-        return 1
+        exit_code = 1
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
-        try:
-            herdr_request("pane.graphics.clear", {"pane_id": pane_id})
-        except Exception:
-            pass
+        web.close()
         mcp.close()
         export_dir.cleanup()
-    return 0
+    if source_pane:
+        subprocess.run(
+            [herdr_bin(), "pane", "close", pane_id], capture_output=True
+        )
+    return exit_code
 
 
 def main() -> int:
@@ -545,9 +821,14 @@ def main() -> int:
         return open_launcher()
     if sys.argv[1] == "launcher":
         return launch_session()
-    if sys.argv[1] == "preview" and len(sys.argv) in (3, 4):
+    if sys.argv[1] == "toggle-preview":
+        return toggle_preview()
+    if sys.argv[1] == "preview" and len(sys.argv) in (3, 4, 5):
         ready_path = sys.argv[3] if len(sys.argv) == 4 else ""
-        return preview(str(Path(sys.argv[2]).resolve()), ready_path)
+        if len(sys.argv) == 5:
+            ready_path = sys.argv[3]
+        source_pane = sys.argv[4] if len(sys.argv) == 5 else ""
+        return preview(str(Path(sys.argv[2]).resolve()), ready_path, source_pane)
     return 2
 
 

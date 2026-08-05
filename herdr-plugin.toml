@@ -1,6 +1,6 @@
 id = "zerodice0.cpen"
 name = "cpen Pencil Session"
-version = "0.1.0"
+version = "0.3.0"
 min_herdr_version = "0.7.5"
 description = "Open a 2:1 agent and live Pencil preview tab."
 platforms = ["macos"]
@@ -11,6 +11,13 @@ title = "Open Pencil Session"
 description = "Select a .pen file and agent, then open a preview tab."
 contexts = ["workspace", "pane"]
 command = ["python3", "herdr/cpen_session.py", "open"]
+
+[[actions]]
+id = "toggle-preview"
+title = "Toggle Pencil Preview"
+description = "Attach or detach a preview beside the focused cpen pane."
+contexts = ["pane"]
+command = ["python3", "herdr/cpen_session.py", "toggle-preview"]
 
 [[panes]]
 id = "launcher"
