@@ -1062,6 +1062,7 @@ class PreviewWebServer:
     def __init__(self, file_path: str) -> None:
         self.file_name = Path(file_path).name
         self.frame_name = ""
+        self.frame_names: list[str] = []
         self.png = b""
         self.revision = 0
         self.token = uuid.uuid4().hex
@@ -1073,7 +1074,7 @@ class PreviewWebServer:
         self.tunnel_command = ""
         self.position = 0
         self.count = 0
-        self.commands: queue.Queue[str] = queue.Queue()
+        self.commands: queue.Queue[str | tuple[str, int]] = queue.Queue()
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         preview = self
@@ -1105,6 +1106,7 @@ class PreviewWebServer:
                             "ready": bool(preview.png),
                             "position": preview.position,
                             "count": preview.count,
+                            "frames": preview.frame_names,
                         }
                     self.send_bytes(
                         200,
@@ -1130,14 +1132,25 @@ class PreviewWebServer:
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length))
+                    if not isinstance(payload, dict):
+                        raise ValueError("request body must be an object")
                     command = str(payload.get("command", ""))
                 except (ValueError, json.JSONDecodeError):
                     self.send_bytes(400, "text/plain; charset=utf-8", b"bad request")
                     return
-                if command not in {"previous", "next", "reload", "close"}:
+                if command == "select":
+                    index = payload.get("index")
+                    with preview.lock:
+                        count = preview.count
+                    if type(index) is not int or not 0 <= index < count:
+                        self.send_bytes(400, "text/plain; charset=utf-8", b"bad index")
+                        return
+                    preview.commands.put((command, index))
+                elif command in {"previous", "next", "reload", "close"}:
+                    preview.commands.put(command)
+                else:
                     self.send_bytes(400, "text/plain; charset=utf-8", b"bad command")
                     return
-                preview.commands.put(command)
                 self.send_bytes(204, "text/plain; charset=utf-8", b"")
 
             def log_message(self, _format: str, *_args: object) -> None:
@@ -1178,17 +1191,20 @@ class PreviewWebServer:
                 last_error = error
         raise RuntimeError(f"브라우저 preview 서버를 열지 못했습니다: {last_error}")
 
-    def update(
-        self, data_base64: str, frame_name: str, position: int = 1, count: int = 1
-    ) -> None:
+    def select(self, frame_name: str, position: int, frame_names: list[str]) -> None:
+        with self.lock:
+            self.frame_name = frame_name
+            self.frame_names = list(frame_names)
+            self.position = position
+            self.count = len(frame_names)
+            self.png = b""
+
+    def update(self, data_base64: str) -> None:
         with self.lock:
             self.png = base64.b64decode(data_base64)
-            self.frame_name = frame_name
-            self.position = position
-            self.count = count
             self.revision += 1
 
-    def poll_commands(self) -> list[str]:
+    def poll_commands(self) -> list[str | tuple[str, int]]:
         commands = []
         while True:
             try:
@@ -1303,12 +1319,14 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         if not frames or not cache:
             return
         frame = frames[selected]
-        png = cache.get(frame["id"])
-        status_message = "" if png else "이미지 준비 중"
-        draw()
         png = cache.select(frame)
+        status_message = "" if png else "이미지 준비 중"
+        web.select(
+            frame["name"], selected + 1, [item["name"] for item in frames]
+        )
         if png:
-            web.update(png, frame["name"], selected + 1, len(frames))
+            web.update(png)
+        draw()
 
     def request_reload() -> None:
         nonlocal status_message
@@ -1319,8 +1337,13 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         cache.reload(selected_id)
         draw()
 
-    def handle_command(command: str) -> bool:
+    def handle_command(command: str | tuple[str, int]) -> bool:
         nonlocal selected, last_mtime
+        if isinstance(command, tuple):
+            if 0 <= command[1] < len(frames):
+                selected = command[1]
+                show_selected()
+            return True
         if command == "close":
             return False
         if command == "next" and selected < len(frames) - 1:
@@ -1352,6 +1375,11 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
                     0,
                 )
                 status_message = "이미지 준비 중"
+                web.select(
+                    frames[selected]["name"],
+                    selected + 1,
+                    [item["name"] for item in frames],
+                )
                 cache.warm(
                     frames, frames[selected]["id"], result["generation"]
                 )
@@ -1359,9 +1387,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
             elif result["kind"] == "image":
                 if frames and frames[selected]["id"] == result["frame_id"]:
                     status_message = ""
-                    web.update(
-                        result["png"], result["frame_name"], selected + 1, len(frames)
-                    )
+                    web.update(result["png"])
                     draw()
             else:
                 status_message = f"이미지 갱신 실패: {result['message']}"
@@ -1377,7 +1403,12 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         initial_png = mcp.export_png(
             file_path, frames[selected]["id"], export_dir.name
         )
-        web.update(initial_png, frames[selected]["name"], selected + 1, len(frames))
+        web.select(
+            frames[selected]["name"],
+            selected + 1,
+            [item["name"] for item in frames],
+        )
+        web.update(initial_png)
         cache = PreviewImageCache(mcp, file_path, export_dir.name)
         cache.seed(frames[selected]["id"], initial_png)
         cache.warm(frames, frames[selected]["id"])

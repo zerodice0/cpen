@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -462,6 +463,7 @@ class HerdrPreviewTests(unittest.TestCase):
 
     def test_browser_preview_serves_latest_png_from_memory(self):
         png = b"\x89PNG\r\n\x1a\npreview"
+        frames = ["Frame 01", "Frame 02", "Frame 03", "Frame 04"]
         with mock.patch.dict(
             MODULE.os.environ,
             {
@@ -473,7 +475,8 @@ class HerdrPreviewTests(unittest.TestCase):
             preview = MODULE.PreviewWebServer("/tmp/design.pen")
             preview.start()
         try:
-            preview.update(base64.b64encode(png).decode(), "Frame 02", 2, 4)
+            preview.select("Frame 02", 2, frames)
+            preview.update(base64.b64encode(png).decode())
             with urlopen(preview.url + "state.json", timeout=2) as response:
                 state = json.loads(response.read())
             with urlopen(preview.url + "frame.png", timeout=2) as response:
@@ -483,7 +486,38 @@ class HerdrPreviewTests(unittest.TestCase):
             self.assertEqual(state["revision"], 1)
             self.assertEqual(state["position"], 2)
             self.assertEqual(state["count"], 4)
+            self.assertEqual(state["frames"], frames)
+            self.assertTrue(state["ready"])
             self.assertEqual(served_png, png)
+        finally:
+            preview.close()
+
+    def test_browser_preview_updates_selection_before_image_is_ready(self):
+        png = base64.b64encode(b"old frame").decode()
+        frames = ["Frame 01", "Frame 02", "Frame 03"]
+        with mock.patch.dict(
+            MODULE.os.environ,
+            {
+                "CPEN_PREVIEW_BIND": "127.0.0.1",
+                "CPEN_PREVIEW_HOST": "127.0.0.1",
+            },
+            clear=False,
+        ):
+            preview = MODULE.PreviewWebServer("/tmp/design.pen")
+            preview.start()
+        try:
+            preview.select("Frame 01", 1, frames)
+            preview.update(png)
+            preview.select("Frame 03", 3, frames)
+
+            with urlopen(preview.url + "state.json", timeout=2) as response:
+                state = json.loads(response.read())
+            self.assertEqual(state["frame"], "Frame 03")
+            self.assertEqual(state["position"], 3)
+            self.assertFalse(state["ready"])
+            with self.assertRaises(HTTPError) as error:
+                urlopen(preview.url + "frame.png", timeout=2)
+            self.assertEqual(error.exception.code, 503)
         finally:
             preview.close()
 
@@ -511,6 +545,47 @@ class HerdrPreviewTests(unittest.TestCase):
         finally:
             preview.close()
 
+    def test_browser_preview_validates_direct_selection(self):
+        frames = ["Frame 01", "Frame 02", "Frame 03"]
+        with mock.patch.dict(
+            MODULE.os.environ,
+            {
+                "CPEN_PREVIEW_BIND": "127.0.0.1",
+                "CPEN_PREVIEW_HOST": "127.0.0.1",
+            },
+            clear=False,
+        ):
+            preview = MODULE.PreviewWebServer("/tmp/design.pen")
+            preview.select("Frame 01", 1, frames)
+            preview.start()
+        try:
+            request = Request(
+                preview.url + "command",
+                data=json.dumps({"command": "select", "index": 2}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 204)
+            self.assertEqual(preview.poll_commands(), [("select", 2)])
+
+            for index in (-1, 3, "1", True, None):
+                with self.subTest(index=index):
+                    request = Request(
+                        preview.url + "command",
+                        data=json.dumps(
+                            {"command": "select", "index": index}
+                        ).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(HTTPError) as error:
+                        urlopen(request, timeout=2)
+                    self.assertEqual(error.exception.code, 400)
+            self.assertEqual(preview.poll_commands(), [])
+        finally:
+            preview.close()
+
     def test_browser_preview_has_keyboard_touch_and_button_navigation(self):
         html = MODULE.PREVIEW_HTML.read_text()
         self.assertIn("id=\"previous\"", html)
@@ -518,6 +593,13 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertIn("keydown", html)
         self.assertIn("pointerdown", html)
         self.assertIn("send(dx < 0 ? 'next' : 'previous')", html)
+        self.assertIn('id="frame-list"', html)
+        self.assertIn("send('select', index)", html)
+        self.assertIn("nextFrameNamesKey !== frameNamesKey", html)
+        self.assertIn("scrollIntoView({ block: 'nearest' })", html)
+        self.assertIn("@media (min-width: 960px)", html)
+        self.assertIn("width: 280px", html)
+        self.assertIn("left: calc(50% + 140px)", html)
 
     def test_export_png_reads_and_immediately_deletes_file(self):
         mcp = object.__new__(MODULE.PencilMCP)
