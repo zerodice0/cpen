@@ -392,6 +392,21 @@ class HerdrPreviewTests(unittest.TestCase):
         html = MODULE.PREVIEW_HTML.read_text()
         self.assertIn("setInterval(refresh, 150)", html)
 
+    def test_browser_preview_retries_failed_frame_revision(self):
+        html = MODULE.PREVIEW_HTML.read_text()
+        self.assertIn("let loadingRevision = null;", html)
+        self.assertIn(
+            "state.revision !== revision && loadingRevision === null", html
+        )
+        self.assertNotIn("revision = state.revision;", html)
+
+        onload = html.split("image.onload = () => {", 1)[1].split("};", 1)[0]
+        self.assertIn("revision = requestedRevision;", onload)
+        self.assertIn("loadingRevision = null;", onload)
+
+        onerror = html.split("image.onerror = () => {", 1)[1].split("};", 1)[0]
+        self.assertIn("loadingRevision = null;", onerror)
+
     def test_pane_run_accepts_empty_stdout(self):
         completed = mock.Mock(returncode=0, stdout="", stderr="")
         with mock.patch.object(MODULE.subprocess, "run", return_value=completed):

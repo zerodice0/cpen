@@ -93,6 +93,7 @@
     const reload = document.getElementById('reload');
     const position = document.getElementById('position');
     let revision = -1;
+    let loadingRevision = null;
     let pointerStart = null;
     let didSwipe = false;
 
@@ -161,10 +162,17 @@
         previous.disabled = state.position <= 1;
         next.disabled = !state.count || state.position >= state.count;
         document.title = `${state.frame || 'Pencil'} · preview`;
-        if (state.ready && state.revision !== revision) {
-          revision = state.revision;
-          image.onload = () => { loading.hidden = true; image.hidden = false; };
-          image.src = `frame.png?v=${revision}`;
+        if (state.ready && state.revision !== revision && loadingRevision === null) {
+          const requestedRevision = state.revision;
+          loadingRevision = requestedRevision;
+          image.onload = () => {
+            revision = requestedRevision;
+            loadingRevision = null;
+            loading.hidden = true;
+            image.hidden = false;
+          };
+          image.onerror = () => { loadingRevision = null; };
+          image.src = `frame.png?v=${requestedRevision}`;
         }
       } catch (_) {
         document.getElementById('frame').textContent = '미리보기 연결 끊김';
