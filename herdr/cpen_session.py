@@ -1219,6 +1219,11 @@ def preview_access_text(url: str) -> str:
     return f"{link}\n{url}"
 
 
+def osc52_copy(text: str) -> str:
+    encoded = base64.b64encode(text.encode()).decode()
+    return f"\x1b]52;c;{encoded}\x07"
+
+
 def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
     pane_id = os.environ.get("HERDR_PANE_ID", "")
     if not pane_id or not sys.stdin.isatty():
@@ -1277,7 +1282,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         if compact:
             name = frames[selected]["name"] if frames else ""
             sys.stdout.write(f"› {clipped(name, max(1, size.columns - 2))}\n")
-            controls = "j/k frame  r reload  q close"
+            controls = "c copy  j/k frame  r reload  q close"
         else:
             visible = frames[
                 max(0, selected - 2): max(0, selected - 2) + menu_rows - 3
@@ -1286,7 +1291,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
             for offset, frame in enumerate(visible):
                 marker = "›" if start + offset == selected else " "
                 sys.stdout.write(f"{marker} {frame['name']}\n")
-            controls = "↑/↓ or j/k: frame  r: reload  q: close"
+            controls = "c: URL 복사  ↑/↓ or j/k: frame  r: reload  q: close"
         if status_message:
             controls += f" · {status_message}"
         sys.stdout.write(clipped(controls, size.columns))
@@ -1393,6 +1398,11 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
                 key = os.read(sys.stdin.fileno(), 1)
                 if key == b"\x1b" and select.select([sys.stdin], [], [], 0.03)[0]:
                     key += os.read(sys.stdin.fileno(), 2)
+                if key in (b"c", b"C"):
+                    sys.stdout.write(osc52_copy(web.url))
+                    status_message = "복사 완료"
+                    draw()
+                    continue
                 command = {
                     b"q": "close", b"Q": "close",
                     b"j": "next", b"\x1b[B": "next",

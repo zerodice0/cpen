@@ -380,6 +380,14 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertTrue(link.endswith("\x1b]8;;\x1b\\"))
         self.assertEqual(shown_url, url)
 
+    def test_osc52_copy_encodes_url_for_clipboard(self):
+        url = "http://design-host.example.ts.net:1234/cpen/token/"
+        sequence = MODULE.osc52_copy(url)
+        self.assertTrue(sequence.startswith("\x1b]52;c;"))
+        self.assertTrue(sequence.endswith("\x07"))
+        payload = sequence.removeprefix("\x1b]52;c;").removesuffix("\x07")
+        self.assertEqual(base64.b64decode(payload).decode(), url)
+
     def test_browser_preview_polls_cached_images_quickly(self):
         html = MODULE.PREVIEW_HTML.read_text()
         self.assertIn("setInterval(refresh, 150)", html)
