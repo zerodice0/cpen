@@ -5,7 +5,7 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
     if set -q _flag_help
         echo "사용법: cpen [-a codex|claude] [-f FILE] [세션 이름...]"
         echo
-        echo "  .pen 파일을 골라 Pen.app 으로 열고 에이전트를 띄운다."
+        echo "  .pen 파일을 골라 Pencil 데스크톱 앱으로 열고 에이전트를 띄운다."
         echo "  에이전트는 -a > \$CPEN_AGENT > 대화형 선택 순으로 결정된다."
         echo
         echo "  -a, --agent <codex|claude>   사용할 에이전트"
@@ -21,8 +21,8 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
     end
 
     if set -q _flag_install_hooks
-        if test (uname -s) = Linux; and not type -q pen; and not type -q pencil
-            echo "cpen: Linux 자동 저장 훅에는 pen 또는 pencil CLI가 필요합니다" >&2
+        if not type -q pen; and not type -q pencil
+            echo "cpen: 자동 저장 훅에는 pen 또는 pencil CLI가 필요합니다" >&2
             return 1
         end
         _cpen_hooks install
@@ -156,17 +156,15 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
 
     if not set -q CPEN_SKIP_OPEN
         set -l open_command
-        switch (uname -s)
-            case Darwin
-                set open_command open -a Pen
-            case Linux
-                if test -n "$CPEN_PENCIL_APP"
-                    set open_command $CPEN_PENCIL_APP
-                else if command -q pen-desktop
-                    set open_command pen-desktop
-                else
-                    set open_command xdg-open
+        if test -n "$CPEN_PENCIL_APP"
+            set open_command $CPEN_PENCIL_APP
+        else
+            for candidate in pen-desktop xdg-open open
+                if type -q $candidate
+                    set open_command $candidate
+                    break
                 end
+            end
         end
         if test (count $open_command) -eq 0; or not $open_command "$pen_file"
             echo "cpen: Pencil 데스크톱 앱으로 파일을 열지 못했습니다: $pen_file" >&2
@@ -202,13 +200,13 @@ function cpen --description "Select a .pen file and start an agent (codex/claude
     # 어차피 부족하다. 대상 지정은 아래 filePath 계약이 맡는다.
 
     # Pencil MCP 의 변경/조회 도구는 모두 filePath 를 받는다. 대상 지정은 그 인자로 하고,
-    # get_app_state 의 '활성 캔버스' 는 Pen.app 전역 공유라 판정 근거로 쓰지 않는다.
+    # get_app_state 의 '활성 캔버스' 는 Pencil 앱 전역 공유라 판정 근거로 쓰지 않는다.
     set -l prompt \
         "Pencil 작업 세션: $session_label" \
         "작업 대상 .pen 파일: $pen_file" \
         "Pencil MCP 도구를 호출할 때 filePath 에는 항상 위 절대 경로를 넘기세요." \
         "수정은 위 파일을 중심으로 하되, 다른 세션도 같은 문서를 변경할 수 있다고 가정하세요." \
-        "활성 캔버스(get_app_state)는 Pen.app 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요." \
+        "활성 캔버스(get_app_state)는 Pencil 앱 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요." \
         ".pen 파일은 Pencil MCP로만 읽고 수정하세요."
     set -a prompt $concurrent_prompt
 

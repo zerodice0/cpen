@@ -19,17 +19,15 @@ function cpen-focus --description "작업 대상 .pen 을 Pencil 데스크톱 �
     end
 
     set -l open_command
-    switch (uname -s)
-        case Darwin
-            set open_command open -a Pen
-        case Linux
-            if test -n "$CPEN_PENCIL_APP"
-                set open_command $CPEN_PENCIL_APP
-            else if command -q pen-desktop
-                set open_command pen-desktop
-            else
-                set open_command xdg-open
+    if test -n "$CPEN_PENCIL_APP"
+        set open_command $CPEN_PENCIL_APP
+    else
+        for candidate in pen-desktop xdg-open open
+            if type -q $candidate
+                set open_command $candidate
+                break
             end
+        end
     end
     if test (count $open_command) -eq 0; or not $open_command "$file" 2>/dev/null
         echo "cpen-focus: Pencil 데스크톱 앱으로 열지 못했습니다: $file" >&2

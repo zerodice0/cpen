@@ -64,10 +64,7 @@ else
 end
 set -e CPEN_SKIP_OPEN
 
-function uname
-    echo Linux
-end
-
+functions -e open
 function xdg-open
     printf '%s\n' $argv >$TMP/xdg-open.log
     return 0
@@ -75,12 +72,28 @@ end
 
 cpen -a codex --file $TMP/repo/design/a.pen Linux >/dev/null
 if grep -Fxq (path resolve $TMP/repo/design/a.pen) $TMP/xdg-open.log
-    echo "  ok   Linux에서는 xdg-open으로 Pencil 파일을 연다"
+    echo "  ok   Linux opener가 있으면 같은 파일 경로를 전달한다"
 else
-    echo "  FAIL Linux Pencil 파일 열기"
+    echo "  FAIL Linux 파일 열기"
     set -g FAILED (math $FAILED + 1)
 end
-functions -e uname xdg-open
+functions -e xdg-open
+
+function pencil-launcher
+    printf '%s\n' $argv >$TMP/pencil-launcher.log
+    return 0
+end
+
+set -lx CPEN_PENCIL_APP pencil-launcher
+cpen -a codex --file $TMP/repo/design/a.pen override >/dev/null
+if grep -Fxq (path resolve $TMP/repo/design/a.pen) $TMP/pencil-launcher.log
+    echo "  ok   CPEN_PENCIL_APP 실행 경로를 우선한다"
+else
+    echo "  FAIL CPEN_PENCIL_APP 실행"
+    set -g FAILED (math $FAILED + 1)
+end
+set -e CPEN_PENCIL_APP
+functions -e pencil-launcher
 
 cpen -a codex --file $TMP/repo/design/missing.pen >/dev/null 2>$TMP/error.log
 if test $status -ne 0; and grep -q '찾을 수 없습니다' $TMP/error.log

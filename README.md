@@ -1,6 +1,6 @@
 # cpen
 
-Pencil `.pen` 파일을 골라 Pen.app 으로 열고, 그 파일을 작업 대상으로 하는
+Pencil `.pen` 파일을 골라 Pencil 데스크톱 앱으로 열고, 그 파일을 작업 대상으로 하는
 코딩 에이전트(codex / claude) 세션을 띄우는 fish 함수.
 
 `.pen` 은 암호화 포맷이라 일반 파일 도구로 못 읽고 Pencil MCP 를 거쳐야 한다.
@@ -17,7 +17,8 @@ Pencil `.pen` 파일을 골라 Pen.app 으로 열고, 그 파일을 작업 대�
 | 필수 명령 | [`fd`](https://github.com/sharkdp/fd), [`fzf`](https://github.com/junegunn/fzf) |
 | 앱 | [Pencil](https://pencil.dev) 데스크톱 앱 |
 | 에이전트 | `codex` 또는 `claude` CLI 중 최소 하나 |
-| 훅 설치용 | `python3`; macOS는 손쉬운 사용 권한, Linux는 `pen` 또는 `pencil` CLI |
+| Herdr/훅 | `python3` |
+| 자동 저장 | Pencil 공식 `pen` 또는 `pencil` CLI |
 
 에이전트 쪽에 **Pencil MCP 서버가 등록되어 있어야 한다**. `cpen` 이 대신
 설정해주지는 않는다.
@@ -75,17 +76,18 @@ set -Ux CPEN_AGENT claude     # 기본 에이전트 고정 (선택 단계가 사
 - 왼쪽 2/3: 기존 `cpen`으로 시작한 Codex 또는 Claude
 - 오른쪽 1/3: 고해상도 브라우저 주소와 프레임 선택 목록
 - 파일이 저장되어 mtime이 바뀌면 선택 프레임을 자동 갱신
-- Pen MCP가 2배 PNG를 임시 경로에 export하고, 읽은 즉시 삭제한 뒤 메모리의 PNG를
-  브라우저에 제공한다. preview 종료 시 HTTP 서버와 임시 디렉터리도 정리한다.
+- Pencil desktop socket이 2배 PNG를 반환하면 메모리에만 보관해 브라우저에 제공한다.
+  preview 종료 시 HTTP 서버와 메모리 캐시를 정리한다.
 
 Herdr 0.7.5 이상이 필요하다. Tailscale이 실행 중이면 해당 인터페이스의 임시 포트에만
 서버를 열고 토큰이 포함된 URL을 표시한다. 같은 tailnet의 브라우저에서 URL을 열면
 원본 비율의 이미지를 Fit 또는 100%로 볼 수 있다. Tailscale을 찾지 못하면 localhost
 주소와 SSH 터널 명령을 대신 표시한다.
 
-Linux에서는 Pencil 데스크톱의 기본 사용자 설치 경로
-`~/.local/opt/pen`과 `pen-desktop` 또는 `xdg-open`을 사용한다. 다른 위치에 설치했다면
-`CPEN_PENCIL_MCP`와 `CPEN_PENCIL_APP`에 각각 MCP 서버와 앱 실행 경로를 지정한다.
+macOS와 Linux 모두 파일 URL의 기본 앱으로 `.pen` 파일을 열고, preview는 Pencil
+데스크톱의 `~/.pencil/socket/pencil-desktop.sock`에 직접 연결한다. 별도 launcher를
+써야 하면 `CPEN_PENCIL_APP`, 기본 위치가 아닌 desktop socket을 쓰면
+`CPEN_PENCIL_SOCKET`에 각각 실행 경로와 socket 경로를 지정한다.
 
 ```sh
 herdr plugin link /absolute/path/to/cpen
@@ -97,8 +99,8 @@ URL을 브라우저에 붙여 넣는다. `j/k` 또는 방향키로 프레임을 
 `q`로 미리보기를 종료한다. 브라우저는 선택된 프레임이 바뀌면 자동 갱신된다. 같은
 방식으로 탭을 여러 개 열 수 있고 각 preview는 서로 다른 포트와 토큰을 사용한다.
 이 시스템의 설정에서는 Ghostty에서 `herdr`를 실행하고 `Ctrl+P`, `p`를 차례로 누른다.
-선택한 문서에 preview agent를 연결하는 동안 Pen이 잠깐 앞으로 오며, 연결과 첫 이미지
-준비가 끝나면 원래 터미널 앱으로 자동 복귀한다.
+preview agent는 절대 `filePath`로 문서에 연결하므로 Pen 창을 앞으로 가져오지 않고
+현재 터미널 포커스를 유지한다.
 
 이미 `cpen`으로 실행 중인 Codex/Claude pane에는 미리보기만 붙일 수 있다. 대상 pane에
 포커스를 두고 `Toggle Pencil Preview`를 실행한다. 이 시스템에서는 `Ctrl+P`, `i`를
@@ -117,7 +119,7 @@ state에 pane ID 기준으로 저장되므로 Codex/Claude에서 `/clear`하거�
 File`은 연결과 미리보기를 함께 제거한다. pane을 닫으면 연결 기록도 자동으로
 정리된다.
 
-초기 프로토타입은 기존 `.pen` 선택만 지원한다. 새 문서 생성은 Pen.app에서 저장한 뒤
+초기 프로토타입은 기존 `.pen` 선택만 지원한다. 새 문서 생성은 Pencil 앱에서 저장한 뒤
 선택하는 흐름으로 둔다.
 
 파일 탐색은 **git 루트** 기준이라 하위 디렉토리에서 실행해도 같은 목록이 나오고,
@@ -159,7 +161,7 @@ Pencil file (claude)> ▊
 - 충돌이 의심되면 반복 수정하지 않고 사용자에게 현재 상태를 보고한다.
 
 Pencil MCP 호출 대상은 활성 창이 아니라 절대 `filePath` 로 고정한다.
-`get_app_state` 의 활성 캔버스는 Pen.app 전역 상태라 다른 세션이 창을 바꾸면 달라질 수
+`get_app_state` 의 활성 캔버스는 Pencil 앱 전역 상태라 다른 세션이 창을 바꾸면 달라질 수
 있으므로, 작업 파일 판정 근거로 사용하지 않는다.
 
 알려진 한계:
@@ -167,7 +169,7 @@ Pencil MCP 호출 대상은 활성 창이 아니라 절대 `filePath` 로 고정
 - 점유 감지는 `cpen` 이 띄운 세션과 해당 프로세스 정보에 한정된다.
 - Cursor 등 `cpen` 밖의 MCP 클라이언트나 사람이 직접 수정하는 것은 감지하지 못한다.
 - 안내는 프롬프트 계약이므로 에이전트가 잘못 판단하면 변경이 서로 간섭할 수 있다.
-- Pen.app 자체가 같은 파일의 변경을 병합하거나 직렬화해 주는 것은 아니다.
+- Pencil 앱 자체가 같은 파일의 변경을 병합하거나 직렬화해 주는 것은 아니다.
 
 ## Pen 창 수동 포커스
 
@@ -178,11 +180,10 @@ cpen-focus
 cpen-focus design/a.pen
 ```
 
-macOS 자동 저장 훅은 응답이 끝날 때 대상 창을 잠깐 활성화해 저장하고, 직전에 사용하던
-앱으로 포커스를 즉시 돌려놓는다. 여러 Pen 창이 열려 있어도 `CPEN_PEN_FILE`의 정확한
-파일 URL로 대상 창을 고른다. 최초 실행에서 macOS가 손쉬운 사용 권한을 요청할 수 있다.
-Linux에서는 `pen interactive --app desktop --in <파일>`에 `save()`를 전달하므로 창
-포커스를 바꾸지 않는다. Pencil 데스크톱 앱이 실행 중이고 CLI 인증이 완료되어 있어야 한다.
+macOS와 Linux 모두 `pen interactive --app desktop --in <파일>`에 `save()`를 전달한다.
+여러 Pencil 문서가 열려 있어도 `CPEN_PEN_FILE`의 정확한 절대 경로를 저장하며 창
+포커스를 바꾸지 않는다. Pencil 데스크톱 앱이 실행 중이고 CLI 인증이 완료되어 있어야
+한다. macOS 손쉬운 사용 권한은 필요하지 않다.
 
 예전 버전이 설치한 `cpen-focus` Stop 훅은 `cpen --install-hooks` 또는
 `cpen --uninstall-hooks` 실행 시 제거한다.
@@ -194,6 +195,10 @@ Linux에서는 `pen interactive --app desktop --in <파일>`에 `save()`를 전�
 ```fish
 fish test/run.fish
 ```
+
+테스트는 두 OS의 공통 분기와 가짜 Unix socket protocol을 검증한다. macOS에서는 공식
+CLI 저장과 실제 desktop socket preview도 확인했다. Linux의 실제 Pencil 데스크톱 연결은
+별도 Linux 호스트에서 확인해야 한다.
 
 ## 라이선스
 

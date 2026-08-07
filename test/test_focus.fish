@@ -1,7 +1,7 @@
 #!/usr/bin/env fish
 # 수동 포커스 명령 테스트.
 #
-# 실제로 Pen.app 을 띄우면 테스트가 화면을 뺏는다. open 을 함수로 가려 호출만 남긴다.
+# 실제로 Pencil을 띄우면 테스트가 화면을 뺏는다. open을 함수로 가려 호출만 남긴다.
 
 set -l here (path dirname (status filename))
 set -l root (path resolve $here/..)
@@ -15,6 +15,7 @@ touch $TMP/design/a.pen
 
 function open
     printf '%s\n' "$argv" >>$TMP/open.log
+    return 0
 end
 
 function ok -a label
