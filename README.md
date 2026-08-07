@@ -1,7 +1,7 @@
 # cpen
 
 Pencil `.pen` 파일을 골라 Pen.app 으로 열고, 그 파일을 작업 대상으로 하는
-코딩 에이전트(codex / claude) 세션을 띄우는 fish 함수.
+코딩 에이전트(codex / claude) 세션을 띄우는 Python 표준 라이브러리 기반 CLI.
 
 `.pen` 은 암호화 포맷이라 일반 파일 도구로 못 읽고 Pencil MCP 를 거쳐야 한다.
 그래서 "어떤 파일을 작업 중인지" 를 셸이 확인할 수 없는데, `cpen` 은 이걸
@@ -13,34 +13,41 @@ Pencil `.pen` 파일을 골라 Pen.app 으로 열고, 그 파일을 작업 대�
 | | |
 |---|---|
 | OS | macOS 또는 Linux |
-| fish | 3.5 이상 (`path` 내장 사용) |
-| 필수 명령 | [`fd`](https://github.com/sharkdp/fd), [`fzf`](https://github.com/junegunn/fzf) |
+| Python | 3.9 이상 |
+| 대화형 선택 | [`fzf`](https://github.com/junegunn/fzf); `-a`, `-f`를 모두 쓰면 불필요 |
 | 앱 | [Pencil](https://pencil.dev) 데스크톱 앱 |
 | 에이전트 | `codex` 또는 `claude` CLI 중 최소 하나 |
-| 훅 설치용 | `python3`; macOS는 손쉬운 사용 권한, Linux는 `pen` 또는 `pencil` CLI |
+| 자동 저장 | macOS는 손쉬운 사용 권한, Linux는 `pen` 또는 `pencil` CLI |
 
 에이전트 쪽에 **Pencil MCP 서버가 등록되어 있어야 한다**. `cpen` 이 대신
 설정해주지는 않는다.
 
 ## 설치
 
-fisher:
+저장소를 clone한 뒤 Python 설치 스크립트를 실행한다. 패키징 프레임워크나 외부 Python
+패키지는 사용하지 않고 `~/.local/bin`에 네 명령과 공유 모듈만 복사한다.
 
-```fish
-fisher install zerodice0/cpen
-```
-
-수동(저장소를 직접 관리하고 싶을 때):
-
-```fish
+```sh
 git clone https://github.com/zerodice0/cpen.git ~/src/cpen
-ln -s ~/src/cpen/functions/*.fish   ~/.config/fish/functions/
-ln -s ~/src/cpen/completions/*.fish ~/.config/fish/completions/
+python3 ~/src/cpen/install.py
 ```
+
+`~/.local/bin`이 `PATH`에 없다면 사용하는 셸 설정에 추가한다.
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+다른 prefix가 필요하면 `python3 install.py --prefix /원하는/경로`를 사용한다.
+Fish는 설치되어 있지 않아도 되고 기본 셸일 필요도 없다. 기존 Fisher 설치는 Python
+진입점을 설치한 뒤 `fisher remove zerodice0/cpen`으로 제거한다. Fish 사용자를 위한
+`completions/*.fish`만 선택적 호환 데이터로 남아 있으며 런타임 코드를 실행하지 않는다.
+필요하면 `completions/*.fish`를 `~/.config/fish/completions/`에 직접 복사할 수 있다.
+이 호환 파일은 1.0에서 제거할 예정이다.
 
 작업 완료 시 선택한 `.pen` 파일을 자동 저장하려면 훅을 한 번 설치한다.
 
-```fish
+```sh
 cpen --install-hooks
 ```
 
@@ -49,7 +56,7 @@ Codex는 새 세션에서 `/hooks`를 열어 새 cpen 훅을 한 번 승인해�
 
 ## 사용법
 
-```fish
+```sh
 cpen                          # 에이전트 선택 → 파일 선택
 cpen -a claude                # 에이전트 선택 단계를 건너뛴다
 cpen -a claude -f design/a.pen # 파일 선택 단계도 건너뛴다
@@ -62,7 +69,7 @@ cpen --uninstall-hooks        # cpen 훅 제거
 cpen-focus                    # 대상 .pen 을 지금 앞으로 가져온다
 cpen-focus design/a.pen       # 경로를 직접 지정할 수도 있다
 
-set -Ux CPEN_AGENT claude     # 기본 에이전트 고정 (선택 단계가 사라진다)
+export CPEN_AGENT=claude      # 기본 에이전트 고정 (선택 단계가 사라진다)
 ```
 
 에이전트는 `-a` > `$CPEN_AGENT` > 대화형 선택 순으로 정해진다.
@@ -122,14 +129,14 @@ File`은 연결과 미리보기를 함께 제거한다. pane을 닫으면 연결
 
 파일 탐색은 **git 루트** 기준이라 하위 디렉토리에서 실행해도 같은 목록이 나오고,
 에이전트도 git 루트에서 시작한다. git 저장소가 아니면 현재 디렉토리를 쓴다.
-`.pen` 을 gitignore 해두는 저장소가 있어 `--no-ignore` 로 훑되,
+`.pen` 을 gitignore 해두는 저장소가 있어 gitignore 여부와 상관없이 훑되,
 `build/` `.dart_tool/` `node_modules/` `Pods/` `.git/` `DerivedData/` 는 제외한다.
 
 ## 에이전트별 차이
 
 |  | codex | claude |
 |---|---|---|
-| 작업 디렉토리 | `-C <git 루트>` | `env -C` (claude 에 `-C` 가 없다) |
+| 작업 디렉토리 | `-C <git 루트>` | Python subprocess의 `cwd` (claude 에 `-C` 가 없다) |
 | 세션 이름 | 프롬프트로 `/rename` 안내 (CLI 플래그 없음) | `--name` 으로 직접 지정 |
 
 ## 동시 편집 안내
@@ -173,7 +180,7 @@ Pencil MCP 호출 대상은 활성 창이 아니라 절대 `filePath` 로 고정
 
 에이전트가 작업한 결과를 확인할 때만 다음 명령을 직접 실행한다.
 
-```fish
+```sh
 cpen-focus
 cpen-focus design/a.pen
 ```
@@ -184,16 +191,20 @@ macOS 자동 저장 훅은 응답이 끝날 때 대상 창을 잠깐 활성화�
 Linux에서는 `pen interactive --app desktop --in <파일>`에 `save()`를 전달하므로 창
 포커스를 바꾸지 않는다. Pencil 데스크톱 앱이 실행 중이고 CLI 인증이 완료되어 있어야 한다.
 
-예전 버전이 설치한 `cpen-focus` Stop 훅은 `cpen --install-hooks` 또는
-`cpen --uninstall-hooks` 실행 시 제거한다.
+예전 버전이 설치한 `fish -c "cpen-save --hook"`과 `cpen-focus` Stop 훅은
+`cpen --install-hooks` 실행 시 Fish를 호출하지 않는 절대 Python 진입점 명령으로
+교체한다. `cpen --uninstall-hooks`는 기존 Fish 기반 cpen 훅도 함께 제거한다.
 `cpen-focus --if-touched` 인자는 구버전 훅이 남아 있는 실행 중 세션이 창을 바꾸지
 않도록 호환용 no-op 으로 유지한다.
 
 ## 테스트
 
-```fish
-fish test/run.fish
+```sh
+PYTHONPYCACHEPREFIX=/tmp/cpen-pycache python3 test/run.py
 ```
+
+테스트 runner와 테스트 구현은 모두 Python 표준 라이브러리만 사용하며 Fish 실행 파일을
+호출하지 않는다.
 
 ## 라이선스
 

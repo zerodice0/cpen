@@ -1,4 +1,4 @@
-# 함수 파일은 호출 시점에야 로드되므로 completion 은 여기에 둔다.
+# 선택적으로 Fish를 쓰는 사용자를 위한 completion 데이터다. cpen 런타임은 Python이다.
 complete -c cpen -f
 complete -c cpen -s a -l agent -x -a "codex claude" -d "사용할 에이전트 (기본: \$CPEN_AGENT 또는 codex)"
 complete -c cpen -s f -l file -r -a "(__fish_complete_suffix .pen)" -d ".pen 파일을 직접 지정"

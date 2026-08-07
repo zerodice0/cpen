@@ -29,12 +29,12 @@ import uuid
 
 
 PLUGIN_ID = "zerodice0.cpen"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 MACOS_PEN_MCP = Path(
     "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/"
     "out/mcp-server-darwin-arm64"
 )
-CPEN_RUNNER = Path(__file__).with_name("run_cpen.fish")
+CPEN_RUNNER = Path(__file__).resolve().parents[1] / "bin" / "cpen"
 FRAME_QUERY = (
     'Get(document,(n,c)=>c.depth===0 && n.type==="frame" && !n.reusable '
     '&& Print(JSON.stringify({id:n.id,name:n.name||"Untitled"})))'
@@ -222,7 +222,7 @@ def agent_command(
     binding_root: str = "",
 ) -> list[str]:
     command = [
-        "fish",
+        sys.executable,
         str(CPEN_RUNNER),
         "-a",
         agent,
@@ -230,7 +230,7 @@ def agent_command(
         pen_file,
         f"pen:{stem}",
     ]
-    environment = []
+    environment = ["CPEN_SKIP_OPEN=1"]
     if external_occupants:
         environment.append(f"CPEN_EXTERNAL_OCCUPANTS={external_occupants}")
     if binding_root:
@@ -334,13 +334,16 @@ def choose(prompt: str, rows: list[str], *, delimiter: bool = False) -> str:
 
 
 def find_pen_files(root: str) -> list[str]:
-    command = [
-        "fd", "--no-ignore", "--absolute-path", "--type", "f", "--extension", "pen",
-        "-E", "build", "-E", ".dart_tool", "-E", "node_modules", "-E", "Pods",
-        "-E", ".git", "-E", "DerivedData", ".", root,
-    ]
-    paths = subprocess.run(command, text=True, capture_output=True, check=True).stdout.splitlines()
-    return [str(Path(item).resolve()) for item in paths]
+    excluded = {"build", ".dart_tool", "node_modules", "Pods", ".git", "DerivedData"}
+    paths = []
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in excluded]
+        paths.extend(
+            str((Path(directory) / name).resolve())
+            for name in files
+            if name.endswith(".pen")
+        )
+    return sorted(paths)
 
 
 def pen_file_rows(paths: list[str], root: str, exclude_pane: str = "") -> list[str]:

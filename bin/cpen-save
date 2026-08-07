@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from cpen_cli import main_save
+
+raise SystemExit(main_save())

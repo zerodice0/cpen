@@ -415,24 +415,34 @@ class HerdrPreviewTests(unittest.TestCase):
 
     def test_pane_run_passes_one_shell_command(self):
         with mock.patch.object(MODULE, "run_cli") as run_cli:
-            MODULE.pane_run("w1:p2", ["fish", "/tmp/run cpen.fish", "a b"])
+            MODULE.pane_run("w1:p2", ["python3", "/tmp/cpen", "a b"])
         run_cli.assert_called_once_with(
-            "pane", "run", "w1:p2", "fish '/tmp/run cpen.fish' 'a b'"
+            "pane", "run", "w1:p2", "python3 /tmp/cpen 'a b'"
         )
 
-    def test_agent_command_uses_script_arguments_instead_of_fish_lc(self):
+    def test_agent_command_runs_the_python_entrypoint_without_a_shell(self):
         command = MODULE.agent_command("codex", "/tmp/a b.pen", "a b")
-        self.assertEqual(command[0], "fish")
-        self.assertEqual(command[1], str(MODULE.CPEN_RUNNER))
-        self.assertNotIn("-lc", command)
+        self.assertEqual(command[:2], ["env", "CPEN_SKIP_OPEN=1"])
+        self.assertEqual(command[2], MODULE.sys.executable)
+        self.assertEqual(command[3], str(MODULE.CPEN_RUNNER))
+        self.assertNotIn("fish", command)
         self.assertEqual(command[-4:], ["codex", "--file", "/tmp/a b.pen", "pen:a b"])
 
     def test_agent_command_passes_external_binding_occupants(self):
         command = MODULE.agent_command(
             "codex", "/tmp/a.pen", "a", "w1:p2, w1:p4"
         )
-        self.assertEqual(command[:2], ["env", "CPEN_EXTERNAL_OCCUPANTS=w1:p2, w1:p4"])
-        self.assertEqual(command[2], "fish")
+        self.assertEqual(command[:3], ["env", "CPEN_SKIP_OPEN=1", "CPEN_EXTERNAL_OCCUPANTS=w1:p2, w1:p4"])
+        self.assertEqual(command[3], MODULE.sys.executable)
+
+    def test_find_pen_files_uses_stdlib_and_skips_generated_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "design").mkdir()
+            (root / "design" / "a.pen").touch()
+            (root / "build").mkdir()
+            (root / "build" / "ignored.pen").touch()
+            self.assertEqual(MODULE.find_pen_files(str(root)), [str((root / "design" / "a.pen").resolve())])
 
     def test_pencil_mcp_uses_unique_preview_agent_without_conversation_id(self):
         first = MODULE.pencil_mcp_command(Path("/tmp/mcp"))
