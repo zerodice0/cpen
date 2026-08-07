@@ -39,54 +39,73 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertNotIn("--target-pane", command)
         self.assertNotIn("--cwd", command)
 
-    def test_pen_open_exit_code_is_not_authoritative(self):
-        completed = mock.Mock(returncode=1)
-        command = ["/usr/bin/open", "-a", "Pen", "/tmp/example.pen"]
-        with mock.patch.object(MODULE, "pen_open_command", return_value=command):
-            with mock.patch.object(
-                MODULE.subprocess, "run", return_value=completed
-            ) as run:
-                MODULE.open_pen("/tmp/example.pen")
-        self.assertFalse(run.call_args.kwargs["check"])
-        self.assertNotIn("-g", run.call_args.args[0])
-
-    def test_linux_pencil_mcp_uses_installed_architecture(self):
-        home = Path("/home/tester")
-        with mock.patch.dict(MODULE.os.environ, {}, clear=True):
-            self.assertEqual(
-                MODULE.pencil_mcp_path("linux", "x86_64", home),
-                home
-                / ".local/opt/pen/app/resources/app.asar.unpacked/out"
-                / "mcp-server-linux-x64",
+    def test_pencil_socket_calls_exact_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = str(Path(directory) / "pencil-desktop.sock")
+            server = MODULE.socket.socket(
+                MODULE.socket.AF_UNIX, MODULE.socket.SOCK_STREAM
             )
-            self.assertEqual(
-                MODULE.pencil_mcp_path("linux", "aarch64", home).name,
-                "mcp-server-linux-arm64",
-            )
+            server.bind(socket_path)
+            server.listen(1)
+            received = []
 
-    def test_linux_pen_open_prefers_desktop_launcher(self):
-        with mock.patch.dict(MODULE.os.environ, {}, clear=True):
-            with mock.patch.object(MODULE.shutil, "which") as which:
-                which.side_effect = lambda name: (
-                    "/home/tester/.local/bin/pen-desktop"
-                    if name == "pen-desktop"
-                    else "/usr/bin/xdg-open"
-                )
-                self.assertEqual(
-                    MODULE.pen_open_command("/tmp/example.pen", "linux"),
-                    ["/home/tester/.local/bin/pen-desktop", "/tmp/example.pen"],
-                )
+            def receive(connection):
+                data = b""
+                while b"\f" not in data:
+                    data += connection.recv(65536)
+                return json.loads(data.split(b"\f", 1)[0])
 
-    def test_pencil_mcp_environment_override_wins(self):
-        with mock.patch.dict(
-            MODULE.os.environ,
-            {"CPEN_PENCIL_MCP": "/opt/pencil/custom-mcp"},
-            clear=True,
-        ):
-            self.assertEqual(
-                MODULE.pencil_mcp_path("linux", "x86_64", Path("/home/tester")),
-                Path("/opt/pencil/custom-mcp"),
-            )
+            def serve():
+                connection, _ = server.accept()
+                assignment = json.dumps(
+                    {
+                        "type": "tool_response",
+                        "data": {
+                            "request_id": "client-id-assignment",
+                            "success": True,
+                            "client_id": "client-1",
+                        },
+                    }
+                ).encode() + b"\f"
+                connection.sendall(assignment[:11])
+                connection.sendall(assignment[11:])
+                received.append(receive(connection))
+                request = receive(connection)
+                received.append(request)
+                request_id = request["data"]["request_id"]
+                response = {
+                    "type": "tool_response",
+                    "data": {
+                        "client_id": "client-1",
+                        "request_id": request_id,
+                        "success": True,
+                        "result": {
+                            "message": 'OK\n\n## Print output\n{"id":"f1","name":"Frame 1"}'
+                        },
+                    },
+                }
+                connection.sendall(json.dumps(response).encode() + b"\f")
+                connection.close()
+
+            thread = threading.Thread(target=serve)
+            thread.start()
+            try:
+                with mock.patch.dict(
+                    MODULE.os.environ, {"CPEN_PENCIL_SOCKET": socket_path}, clear=True
+                ):
+                    mcp = MODULE.PencilMCP()
+                    frames = mcp.frames("/tmp/example.pen")
+                    mcp.close()
+            finally:
+                thread.join(timeout=2)
+                server.close()
+
+        self.assertEqual(frames, [{"id": "f1", "name": "Frame 1"}])
+        self.assertEqual(received[0]["type"], "agent_connected")
+        self.assertTrue(received[0]["data"]["agent"].startswith("cpenPreview-"))
+        self.assertEqual(
+            received[1]["data"]["payload"]["filePath"], "/tmp/example.pen"
+        )
 
     def test_wait_for_ready_observes_signal_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -444,13 +463,6 @@ class HerdrPreviewTests(unittest.TestCase):
             (root / "build" / "ignored.pen").touch()
             self.assertEqual(MODULE.find_pen_files(str(root)), [str((root / "design" / "a.pen").resolve())])
 
-    def test_pencil_mcp_uses_unique_preview_agent_without_conversation_id(self):
-        first = MODULE.pencil_mcp_command(Path("/tmp/mcp"))
-        second = MODULE.pencil_mcp_command(Path("/tmp/mcp"))
-        self.assertTrue(first[-1].startswith("cpenPreview-"))
-        self.assertNotEqual(first[-1], second[-1])
-        self.assertNotIn("--conversation_id", first)
-
     def test_tailscale_identity_uses_running_self_address(self):
         completed = mock.Mock(
             returncode=0,
@@ -611,13 +623,18 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertIn("width: 280px", html)
         self.assertIn("left: calc(50% + 140px)", html)
 
-    def test_export_png_reads_and_immediately_deletes_file(self):
+    def test_export_png_returns_desktop_image(self):
         mcp = object.__new__(MODULE.PencilMCP)
         png = b"\x89PNG\r\n\x1a\npreview"
 
         def export(_name, arguments):
-            Path(arguments["outputDir"], "frame.png").write_bytes(png)
-            return {}
+            self.assertEqual(arguments["filePath"], "/tmp/design.pen")
+            self.assertEqual(arguments["nodeIds"], ["frame"])
+            return {
+                "images": [
+                    {"nodeId": "frame", "image": base64.b64encode(png).decode()}
+                ]
+            }
 
         with tempfile.TemporaryDirectory() as output_dir:
             with mock.patch.object(mcp, "call", side_effect=export):

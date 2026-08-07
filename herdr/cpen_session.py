@@ -8,11 +8,9 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
-import platform
 from pathlib import Path
 import queue
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -30,10 +28,6 @@ import uuid
 
 PLUGIN_ID = "zerodice0.cpen"
 PLUGIN_VERSION = "0.6.0"
-MACOS_PEN_MCP = Path(
-    "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/"
-    "out/mcp-server-darwin-arm64"
-)
 CPEN_RUNNER = Path(__file__).resolve().parents[1] / "bin" / "cpen"
 FRAME_QUERY = (
     'Get(document,(n,c)=>c.depth===0 && n.type==="frame" && !n.reusable '
@@ -240,40 +234,6 @@ def agent_command(
     return command
 
 
-def pencil_mcp_command(binary: Path) -> list[str]:
-    agent = f"cpenPreview-{uuid.uuid4().hex[:8]}"
-    return [str(binary), "--app", "desktop", "--agent", agent]
-
-
-def pencil_mcp_path(
-    system: str | None = None,
-    machine: str | None = None,
-    home: Path | None = None,
-) -> Path:
-    override = os.environ.get("CPEN_PENCIL_MCP")
-    if override:
-        return Path(override).expanduser()
-    system = system or sys.platform
-    if system == "darwin":
-        return MACOS_PEN_MCP
-    if system.startswith("linux"):
-        architecture = {
-            "x86_64": "x64",
-            "amd64": "x64",
-            "aarch64": "arm64",
-            "arm64": "arm64",
-        }.get((machine or platform.machine()).lower())
-        if not architecture:
-            raise RuntimeError(f"지원하지 않는 Linux 아키텍처: {machine}")
-        root = home or Path.home()
-        return (
-            root
-            / ".local/opt/pen/app/resources/app.asar.unpacked/out"
-            / f"mcp-server-linux-{architecture}"
-        )
-    raise RuntimeError(f"지원하지 않는 운영체제: {system}")
-
-
 def invocation_values() -> tuple[str, str]:
     data = context()
     cwd = (
@@ -358,57 +318,6 @@ def pen_file_rows(paths: list[str], root: str, exclude_pane: str = "") -> list[s
     return rows
 
 
-def pen_open_command(file_path: str, system: str | None = None) -> list[str]:
-    system = system or sys.platform
-    if system == "darwin":
-        return ["/usr/bin/open", "-a", "Pen", file_path]
-    if system.startswith("linux"):
-        override = os.environ.get("CPEN_PENCIL_APP")
-        opener = override or shutil.which("pen-desktop") or shutil.which("xdg-open")
-        return [opener, file_path] if opener else []
-    return []
-
-
-def open_pen(file_path: str) -> None:
-    # The MCP transport binds a new agent to Pen's active document window.
-    command = pen_open_command(file_path)
-    if not command:
-        raise RuntimeError("Pencil 데스크톱 앱을 여는 명령을 찾지 못했습니다")
-    subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-
-
-def frontmost_bundle_id() -> str:
-    if sys.platform != "darwin":
-        return ""
-    result = subprocess.run(
-        [
-            "osascript",
-            "-e",
-            'tell application "System Events" to get bundle identifier of '
-            "first application process whose frontmost is true",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def activate_bundle(bundle_id: str) -> None:
-    if bundle_id and sys.platform == "darwin":
-        subprocess.run(
-            ["/usr/bin/open", "-b", bundle_id],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-
-
 def wait_for_ready(path: Path, timeout: float = 22) -> bool:
     if path.exists():
         return True
@@ -423,10 +332,7 @@ def wait_for_ready(path: Path, timeout: float = 22) -> bool:
 def start_preview(pane_id: str, pen_file: str, source_pane: str = "") -> None:
     script = str(Path(__file__).resolve())
     ready_path = Path(tempfile.gettempdir()) / f"cpen-preview-{uuid.uuid4()}.ready"
-    previous_bundle = frontmost_bundle_id()
     try:
-        open_pen(pen_file)
-        time.sleep(0.75)
         command = [sys.executable, script, "preview", pen_file, str(ready_path)]
         if source_pane:
             command.append(source_pane)
@@ -434,7 +340,6 @@ def start_preview(pane_id: str, pen_file: str, source_pane: str = "") -> None:
         if not wait_for_ready(ready_path):
             raise RuntimeError("Pencil preview 연결 시간이 초과됐습니다")
     finally:
-        activate_bundle(previous_bundle)
         ready_path.unlink(missing_ok=True)
 
 
@@ -755,60 +660,77 @@ def launch_session() -> int:
 
 class PencilMCP:
     def __init__(self) -> None:
-        binary = pencil_mcp_path()
-        self.process = subprocess.Popen(
-            pencil_mcp_command(binary),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=None if os.environ.get("CPEN_MCP_DEBUG") else subprocess.DEVNULL,
-            text=True, bufsize=1,
+        path = os.environ.get("CPEN_PENCIL_SOCKET") or str(
+            Path.home() / ".pencil/socket/pencil-desktop.sock"
         )
-        self.next_id = 0
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.settimeout(20)
+        self.buffer = b""
         try:
-            self.request(
-                "initialize",
-                {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cpen-preview", "version": PLUGIN_VERSION}},
+            self.socket.connect(path)
+            assignment = self.receive()
+            data = assignment.get("data", {})
+            if (
+                assignment.get("type") != "tool_response"
+                or data.get("request_id") != "client-id-assignment"
+                or not data.get("success")
+                or not data.get("client_id")
+            ):
+                raise RuntimeError("Pencil desktop client ID를 받지 못했습니다")
+            self.client_id = data["client_id"]
+            self.send(
+                {
+                    "type": "agent_connected",
+                    "data": {
+                        "client_id": self.client_id,
+                        "agent": f"cpenPreview-{uuid.uuid4().hex[:8]}",
+                    },
+                }
             )
-            self.notify("notifications/initialized", {})
-            # The desktop socket assigns the client and agent name asynchronously.
-            time.sleep(0.25)
         except Exception:
             self.close()
             raise
 
-    def request(self, method: str, params: dict) -> dict:
-        self.next_id += 1
-        request_id = self.next_id
-        assert self.process.stdin and self.process.stdout
-        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
-        self.process.stdin.flush()
-        while True:
-            if not select.select([self.process.stdout], [], [], 20)[0]:
-                raise RuntimeError(f"Pen MCP 응답 시간 초과: {method}")
-            line = self.process.stdout.readline()
-            if not line:
-                raise RuntimeError("Pen MCP 연결이 종료되었습니다")
-            message = json.loads(line)
-            if message.get("id") != request_id:
-                continue
-            if "error" in message:
-                raise RuntimeError(message["error"].get("message", str(message["error"])))
-            return message["result"]
+    def send(self, message: dict) -> None:
+        self.socket.sendall(json.dumps(message).encode() + b"\f")
 
-    def notify(self, method: str, params: dict) -> None:
-        assert self.process.stdin
-        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n")
-        self.process.stdin.flush()
+    def receive(self) -> dict:
+        while b"\f" not in self.buffer:
+            chunk = self.socket.recv(65536)
+            if not chunk:
+                raise RuntimeError("Pencil desktop 연결이 종료되었습니다")
+            self.buffer += chunk
+        raw, self.buffer = self.buffer.split(b"\f", 1)
+        return json.loads(raw)
 
     def call(self, name: str, arguments: dict) -> dict:
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
-        if result.get("isError"):
-            text = next((item.get("text", "") for item in result.get("content", []) if item.get("type") == "text"), "Pencil MCP 오류")
-            raise RuntimeError(text)
-        return result
+        request_id = str(uuid.uuid4())
+        self.send(
+            {
+                "type": "tool_request",
+                "data": {
+                    "client_id": self.client_id,
+                    "request_id": request_id,
+                    "name": name.replace("_", "-"),
+                    "payload": arguments,
+                },
+            }
+        )
+        while True:
+            message = self.receive()
+            data = message.get("data", {})
+            if (
+                message.get("type") != "tool_response"
+                or data.get("request_id") != request_id
+            ):
+                continue
+            if not data.get("success"):
+                raise RuntimeError(data.get("error") or "Pencil desktop 오류")
+            return data.get("result") or {}
 
     def frames(self, file_path: str) -> list[dict]:
         result = self.call("execute", {"filePath": file_path, "input": FRAME_QUERY})
-        text = "\n".join(item.get("text", "") for item in result.get("content", []) if item.get("type") == "text")
+        text = result.get("message", "")
         frames = []
         for line in text.splitlines():
             try:
@@ -820,35 +742,23 @@ class PencilMCP:
         return frames
 
     def export_png(self, file_path: str, node_id: str, output_dir: str) -> str:
-        directory = Path(output_dir)
-        for old_file in directory.glob("*.png"):
-            old_file.unlink()
-        try:
-            self.call(
-                "export_nodes",
-                {
-                    "filePath": file_path,
-                    "nodeIds": [node_id],
-                    "outputDir": output_dir,
-                    "format": "png",
-                    "scale": 2,
-                },
-            )
-            exported = list(directory.glob("*.png"))
-            if len(exported) != 1:
-                raise RuntimeError("Pencil MCP가 PNG 파일 하나를 내보내지 않았습니다")
-            return base64.b64encode(exported[0].read_bytes()).decode()
-        finally:
-            for exported_file in directory.glob("*.png"):
-                exported_file.unlink(missing_ok=True)
+        result = self.call(
+            "export_nodes",
+            {
+                "filePath": file_path,
+                "nodeIds": [node_id],
+                "outputDir": output_dir,
+                "format": "png",
+                "scale": 2,
+            },
+        )
+        images = result.get("images", [])
+        if len(images) != 1 or not images[0].get("image"):
+            raise RuntimeError("Pencil desktop이 PNG 이미지 하나를 반환하지 않았습니다")
+        return images[0]["image"]
 
     def close(self) -> None:
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+        self.socket.close()
 
 
 class PreviewImageCache:
@@ -1264,7 +1174,7 @@ def preview(file_path: str, ready_path: str = "", source_pane: str = "") -> int:
         except (OSError, RuntimeError, json.JSONDecodeError):
             time.sleep(0.5)
     if not mcp:
-        print("cpen: Pen.app MCP에 연결하지 못했습니다. Pen.app을 확인하세요.")
+        print("cpen: Pencil 데스크톱에 연결하지 못했습니다. 앱 실행 상태를 확인하세요.")
         if source_pane:
             time.sleep(4)
             subprocess.run(

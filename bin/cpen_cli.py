@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import re
 import shlex
 import shutil
@@ -208,17 +207,15 @@ def choose_agent() -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def pencil_open_command(pen_file: Path, system: str | None = None) -> list[str]:
-    system = system or platform.system()
-    if system == "Darwin":
-        return ["open", "-a", "Pen", str(pen_file)]
-    if system == "Linux":
-        override = os.environ.get("CPEN_PENCIL_APP")
-        if override:
-            return [override, str(pen_file)]
-        launcher = shutil.which("pen-desktop") or shutil.which("xdg-open") or "xdg-open"
-        return [launcher, str(pen_file)]
-    return []
+def pencil_open_command(pen_file: Path) -> list[str]:
+    override = os.environ.get("CPEN_PENCIL_APP")
+    if override:
+        return [override, str(pen_file)]
+    launcher = next(
+        (path for name in ("pen-desktop", "xdg-open", "open") if (path := shutil.which(name))),
+        None,
+    )
+    return [launcher, str(pen_file)] if launcher else []
 
 
 def open_pencil(pen_file: Path) -> bool:
@@ -261,7 +258,7 @@ def build_prompt(
         f"작업 대상 .pen 파일: {pen_file}",
         "Pencil MCP 도구를 호출할 때 filePath 에는 항상 위 절대 경로를 넘기세요.",
         "수정은 위 파일을 중심으로 하되, 다른 세션도 같은 문서를 변경할 수 있다고 가정하세요.",
-        "활성 캔버스(get_app_state)는 Pen.app 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요.",
+        "활성 캔버스(get_app_state)는 Pencil 앱 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요.",
         ".pen 파일은 Pencil MCP로만 읽고 수정하세요.",
         *concurrent,
     ]
@@ -304,8 +301,8 @@ def cpen_parser() -> argparse.ArgumentParser:
 def main_cpen(argv: list[str] | None = None) -> int:
     args = cpen_parser().parse_args(argv)
     if args.install_hooks:
-        if platform.system() == "Linux" and not (shutil.which("pen") or shutil.which("pencil")):
-            eprint("cpen: Linux 자동 저장 훅에는 pen 또는 pencil CLI가 필요합니다")
+        if not (shutil.which("pen") or shutil.which("pencil")):
+            eprint("cpen: 자동 저장 훅에는 pen 또는 pencil CLI가 필요합니다")
             return 1
         return edit_hooks("install")
     if args.uninstall_hooks:
@@ -417,73 +414,21 @@ def main_focus(argv: list[str] | None = None) -> int:
     return 0
 
 
-APPLE_SAVE_SCRIPT = [
-    'use framework "Foundation"',
-    "on run argv",
-    "set targetPath to item 1 of argv",
-    "set targetURL to ((current application's NSURL's fileURLWithPath:targetPath)'s absoluteString()) as text",
-    'tell application "System Events"',
-    'if not (exists application process "Pen") then error "Pen.app is not running"',
-    'tell application process "Pen" to set windowNames to name of every window',
-    'if windowNames does not contain targetURL then return "window-unavailable"',
-    "set previousProcess to first application process whose frontmost is true",
-    "try",
-    'tell application process "Pen"',
-    'set targetWindow to first window whose name is targetURL',
-    "set frontmost to true",
-    'perform action "AXRaise" of targetWindow',
-    'set value of attribute "AXMain" of targetWindow to true',
-    'set value of attribute "AXFocused" of targetWindow to true',
-    "delay 0.1",
-    'click menu item "Save" of menu "File" of menu bar 1',
-    "end tell",
-    "delay 0.1",
-    'if name of previousProcess is not "Pen" then set frontmost of previousProcess to true',
-    "on error errorMessage number errorNumber",
-    'if name of previousProcess is not "Pen" then set frontmost of previousProcess to true',
-    "error errorMessage number errorNumber",
-    "end try",
-    "end tell",
-    "end run",
-]
-
-
-def save_file(pen_file: Path, hook: bool, system: str | None = None) -> int:
-    system = system or platform.system()
-    if system == "Linux":
-        pencil = shutil.which("pen") or shutil.which("pencil")
-        if not pencil:
-            eprint("cpen-save: pen 또는 pencil CLI를 찾을 수 없습니다")
-            return 1
-        result = subprocess.run(
-            [pencil, "interactive", "--app", "desktop", "--in", str(pen_file)],
-            input="save()\nexit()\n",
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if result.returncode != 0:
-            return 1
-        print("{}" if hook else f"cpen: 저장 완료 ({pen_file})")
-        return 0
-    if system != "Darwin":
-        eprint(f"cpen-save: 지원하지 않는 OS입니다: {system}")
+def save_file(pen_file: Path, hook: bool) -> int:
+    pencil = shutil.which("pen") or shutil.which("pencil")
+    if not pencil:
+        eprint("cpen-save: pen 또는 pencil CLI를 찾을 수 없습니다")
         return 1
-    command = ["osascript"]
-    for line in APPLE_SAVE_SCRIPT:
-        command.extend(["-e", line])
-    command.extend(["--", str(pen_file)])
-    result = subprocess.run(command, text=True, capture_output=True)
+    result = subprocess.run(
+        [pencil, "interactive", "--app", "desktop", "--in", str(pen_file)],
+        input="save()\nexit()\n",
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     if result.returncode != 0:
-        if result.stderr:
-            eprint(result.stderr.rstrip())
         return 1
-    if hook:
-        print("{}")
-    elif result.stdout.strip() == "window-unavailable":
-        print(f"cpen: 저장 건너뜀 - 화면이 잠겼거나 대상 Pen 창이 열려 있지 않습니다 ({pen_file})")
-    else:
-        print(f"cpen: 저장 완료 ({pen_file})")
+    print("{}" if hook else f"cpen: 저장 완료 ({pen_file})")
     return 0
 
 

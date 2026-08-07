@@ -149,40 +149,33 @@ class CpenCliTests(unittest.TestCase):
                 self.assertEqual(MODULE.main_focus([]), 0)
             open_pencil.assert_called_once_with(pen_file.resolve())
 
-    def test_macos_save_targets_exact_window_and_restores_focus(self):
+    def test_open_prefers_override_then_available_default_app(self):
         with tempfile.TemporaryDirectory() as directory:
             pen_file = Path(directory) / "a.pen"
             pen_file.touch()
-            completed = mock.Mock(returncode=0, stdout="saved\n", stderr="")
-            with mock.patch.object(MODULE.platform, "system", return_value="Darwin"), mock.patch.object(
-                MODULE.subprocess, "run", return_value=completed
-            ) as run, mock.patch("sys.stdout", new_callable=io.StringIO):
-                self.assertEqual(MODULE.main_save([str(pen_file)]), 0)
-            command = run.call_args.args[0]
-            script = "\n".join(command)
-            self.assertIn("windowNames does not contain targetURL", script)
-            self.assertIn('perform action "AXRaise"', script)
-            self.assertIn("previousProcess", script)
-            self.assertIn('menu item "Save"', script)
-            self.assertEqual(command[-1], str(pen_file.resolve()))
+            with mock.patch.dict(
+                MODULE.os.environ, {"CPEN_PENCIL_APP": "/opt/pencil-launcher"}, clear=True
+            ):
+                self.assertEqual(
+                    MODULE.pencil_open_command(pen_file),
+                    ["/opt/pencil-launcher", str(pen_file)],
+                )
+            with mock.patch.dict(MODULE.os.environ, {}, clear=True), mock.patch.object(
+                MODULE.shutil,
+                "which",
+                side_effect=lambda name: "/usr/bin/open" if name == "open" else None,
+            ):
+                self.assertEqual(
+                    MODULE.pencil_open_command(pen_file),
+                    ["/usr/bin/open", str(pen_file)],
+                )
 
-    def test_macos_window_unavailable_is_successful_hook_json(self):
-        with tempfile.TemporaryDirectory() as directory:
-            pen_file = Path(directory) / "a.pen"
-            pen_file.touch()
-            completed = mock.Mock(returncode=0, stdout="window-unavailable\n", stderr="")
-            with mock.patch.object(MODULE.platform, "system", return_value="Darwin"), mock.patch.object(
-                MODULE.subprocess, "run", return_value=completed
-            ), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
-                self.assertEqual(MODULE.main_save(["--hook", str(pen_file)]), 0)
-            self.assertEqual(output.getvalue(), "{}\n")
-
-    def test_linux_save_uses_pencil_cli(self):
+    def test_save_uses_official_pencil_cli_on_every_os(self):
         with tempfile.TemporaryDirectory() as directory:
             pen_file = Path(directory) / "a.pen"
             pen_file.touch()
             completed = mock.Mock(returncode=0)
-            with mock.patch.object(MODULE.platform, "system", return_value="Linux"), mock.patch.object(
+            with mock.patch.object(
                 MODULE.shutil, "which", side_effect=lambda name: "/usr/bin/pen" if name == "pen" else None
             ), mock.patch.object(MODULE.subprocess, "run", return_value=completed) as run, mock.patch(
                 "sys.stdout", new_callable=io.StringIO
@@ -257,7 +250,10 @@ class CpenCliTests(unittest.TestCase):
         ]
         pattern = re.compile(r"fish\s+-c|run_cpen\.fish|[\[(][\"']fish[\"']")
         for path in runtime:
-            self.assertIsNone(pattern.search(path.read_text()), path)
+            text = path.read_text()
+            self.assertIsNone(pattern.search(text), path)
+            self.assertNotIn("osascript", text, path)
+            self.assertNotIn("MACOS_PEN_MCP", text, path)
 
 
 if __name__ == "__main__":
