@@ -20,7 +20,23 @@ Pencil `.pen` 파일을 골라 Pencil 데스크톱 앱으로 열고, 그 파일�
 | 자동 저장 | Pencil 공식 `pen` 또는 `pencil` CLI |
 
 에이전트 쪽에 **Pencil MCP 서버가 등록되어 있어야 한다**. `cpen` 이 대신
-설정해주지는 않는다.
+설정해주지는 않지만, Codex 실행 전 등록값을 검사해 Cursor MCP이거나 Pen desktop
+대상이 아니면 실행을 중단한다.
+
+### Codex Pencil MCP 정책
+
+Codex도 Claude와 동일하게 **Pen 데스크톱 앱의 내장 MCP 서버**를 사용한다. Cursor용
+Pencil MCP는 절대 사용하지 않는다. macOS의 Codex 등록값은 다음과 같아야 한다.
+
+```toml
+[mcp_servers.pencil]
+command = "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64"
+args = ["--app", "desktop", "--agent", "codexCLI"]
+```
+
+Linux에서도 `--app desktop`인 비-Cursor Pencil MCP만 허용한다. 이 정책은 `cpen -a
+codex`의 실행 전 검사와 테스트로 유지하며, 설정이 어긋나면 Pen 앱이나 Codex를 띄우기
+전에 실패한다.
 
 ## 설치
 

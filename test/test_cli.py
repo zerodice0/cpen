@@ -41,7 +41,7 @@ class CpenCliTests(unittest.TestCase):
                 MODULE, "open_pencil", return_value=True
             ) as open_pencil, mock.patch.object(MODULE, "bind_herdr_pane"), mock.patch.object(
                 MODULE, "run_agent", return_value=0
-            ) as run_agent:
+            ) as run_agent, mock.patch.object(MODULE, "validate_codex_pencil_mcp", return_value=True):
                 status = MODULE.main_cpen(["-a", "codex", "--file", str(pen_file), "직접", "지정"])
             self.assertEqual(status, 0)
             open_pencil.assert_called_once_with(pen_file.resolve())
@@ -94,13 +94,59 @@ class CpenCliTests(unittest.TestCase):
                 MODULE, "open_pencil", return_value=True
             ), mock.patch.object(MODULE, "bind_herdr_pane"), mock.patch.object(
                 MODULE, "run_agent", return_value=0
-            ) as run_agent:
+            ) as run_agent, mock.patch.object(MODULE, "validate_codex_pencil_mcp", return_value=True):
                 status = MODULE.main_cpen(["-a", "codex", "-f", str(pen_file)])
             self.assertEqual(status, 0)
             prompt = run_agent.call_args.args[-1]
             self.assertIn('codex(pid 123, "pen:기존세션")', prompt)
             self.assertIn("수정 직전에 대상 노드를 다시 읽고", prompt)
             self.assertNotIn("차단합니다", prompt)
+
+    def test_codex_pencil_mcp_accepts_pen_app_desktop_config(self):
+        document = {
+            "enabled": True,
+            "transport": {
+                "type": "stdio",
+                "command": MODULE.PEN_APP_MCP,
+                "args": ["--app", "desktop", "--agent", "codexCLI"],
+            },
+        }
+        completed = mock.Mock(returncode=0, stdout=json.dumps(document))
+        with mock.patch.object(MODULE.sys, "platform", "darwin"), mock.patch.object(
+            MODULE.subprocess, "run", return_value=completed
+        ):
+            self.assertTrue(MODULE.validate_codex_pencil_mcp())
+
+    def test_codex_pencil_mcp_rejects_cursor_config(self):
+        document = {
+            "enabled": True,
+            "transport": {
+                "type": "stdio",
+                "command": "/Users/me/.pencil/mcp/cursor/out/mcp-server",
+                "args": ["--app", "cursor", "--agent", "codexCLI"],
+            },
+        }
+        completed = mock.Mock(returncode=0, stdout=json.dumps(document))
+        with mock.patch.object(MODULE.subprocess, "run", return_value=completed), mock.patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as error:
+            self.assertFalse(MODULE.validate_codex_pencil_mcp())
+        self.assertIn("Cursor Pencil MCP는 사용할 수 없습니다", error.getvalue())
+
+    def test_cpen_does_not_start_codex_when_pencil_mcp_is_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pen_file = Path(directory) / "a.pen"
+            pen_file.touch()
+            with mock.patch.object(MODULE, "git_root", return_value=Path(directory)), mock.patch.object(
+                MODULE, "validate_codex_pencil_mcp", return_value=False
+            ), mock.patch.object(MODULE, "acquire_lease") as acquire_lease, mock.patch.object(
+                MODULE, "open_pencil"
+            ) as open_pencil, mock.patch.object(MODULE, "run_agent") as run_agent:
+                status = MODULE.main_cpen(["-a", "codex", "-f", str(pen_file)])
+            self.assertEqual(status, 1)
+            acquire_lease.assert_not_called()
+            open_pencil.assert_not_called()
+            run_agent.assert_not_called()
 
     def test_missing_and_non_pen_files_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

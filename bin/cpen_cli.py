@@ -20,6 +20,7 @@ import uuid
 
 SKIP_DIRS = {"build", ".dart_tool", "node_modules", "Pods", ".git", "DerivedData"}
 LEGACY_HOOK_MARKS = ("cpen-guard", "cpen-focus")
+PEN_APP_MCP = "/Applications/Pen.app/Contents/Resources/app.asar.unpacked/out/mcp-server-darwin-arm64"
 
 
 def eprint(message: str) -> None:
@@ -250,6 +251,54 @@ def bind_herdr_pane(pen_file: Path) -> None:
     )
 
 
+def validate_codex_pencil_mcp() -> bool:
+    try:
+        result = subprocess.run(
+            ["codex", "mcp", "get", "pencil", "--json"],
+            text=True,
+            capture_output=True,
+        )
+    except OSError:
+        eprint("cpen: Codex Pencil MCP 설정을 확인할 수 없습니다")
+        return False
+    if result.returncode != 0:
+        eprint("cpen: Codex에 Pencil MCP가 등록되어 있지 않습니다")
+        return False
+    try:
+        document = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        eprint("cpen: Codex Pencil MCP 설정을 읽을 수 없습니다")
+        return False
+
+    transport = document.get("transport", {})
+    command = transport.get("command", "")
+    args = transport.get("args", [])
+    values = [command, *args] if isinstance(command, str) and isinstance(args, list) else []
+    if not values or any("cursor" in str(value).lower() for value in values):
+        eprint("cpen: Cursor Pencil MCP는 사용할 수 없습니다. Pen desktop MCP를 등록하세요")
+        return False
+    try:
+        app = args[args.index("--app") + 1]
+    except (ValueError, IndexError):
+        app = ""
+    try:
+        agent = args[args.index("--agent") + 1]
+    except (ValueError, IndexError):
+        agent = ""
+    if (
+        transport.get("type") != "stdio"
+        or app != "desktop"
+        or agent != "codexCLI"
+        or document.get("enabled") is False
+    ):
+        eprint("cpen: Codex Pencil MCP는 Pen desktop 대상으로 등록되어야 합니다")
+        return False
+    if sys.platform == "darwin" and command != PEN_APP_MCP:
+        eprint(f"cpen: Codex Pencil MCP는 Pen.app 내장 서버를 사용해야 합니다: {PEN_APP_MCP}")
+        return False
+    return True
+
+
 def build_prompt(
     session: str, pen_file: Path, concurrent: list[str], agent: str
 ) -> str:
@@ -345,6 +394,9 @@ def main_cpen(argv: list[str] | None = None) -> int:
         if not picked:
             return 1
         pen_file = Path(picked.split("\t", 1)[0])
+
+    if agent == "codex" and not validate_codex_pencil_mcp():
+        return 1
 
     session = " ".join(args.session) or f"pen:{pen_file.stem}"
     token = uuid.uuid4().hex
