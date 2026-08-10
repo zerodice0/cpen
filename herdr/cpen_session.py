@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import select
 import shlex
 import shutil
 import signal

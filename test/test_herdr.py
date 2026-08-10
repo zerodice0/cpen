@@ -20,6 +20,9 @@ SPEC.loader.exec_module(MODULE)
 
 
 class HerdrPreviewTests(unittest.TestCase):
+    def test_preview_keyboard_polling_has_select_module(self):
+        self.assertTrue(callable(MODULE.select.select))
+
     def test_context_values_prefer_explicit_launcher_environment(self):
         old = dict(MODULE.os.environ)
         try:
