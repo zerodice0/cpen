@@ -54,15 +54,21 @@
     #frame-list button[aria-current="true"] .frame-number { color: #cdd9ff; }
     .frame-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     main {
-      height: 100%; min-width: 0; flex: 1; display: flex; align-items: center;
-      justify-content: center; overflow: auto; padding: 24px 24px 92px;
+      height: 100%; min-width: 0; flex: 1; overflow: auto;
+      overscroll-behavior: contain; touch-action: none;
+    }
+    #surface {
+      width: max-content; height: max-content; min-width: 100%; min-height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px 24px 92px;
     }
     img { display: block; image-rendering: auto; box-shadow: 0 18px 60px #0009; }
     img[hidden] { display: none; }
+    main.fit #surface { width: 100%; height: 100%; }
     main.fit img { max-width: 100%; max-height: 100%; object-fit: contain; }
-    main.fit { touch-action: pan-y pinch-zoom; }
-    main.actual { display: block; }
-    main.actual img { max-width: none; max-height: none; margin: 0 auto; }
+    main.zoomed { cursor: grab; }
+    main.zoomed.dragging { cursor: grabbing; user-select: none; }
+    main.zoomed img { max-width: none; max-height: none; flex: none; }
     #loading { color: #8e98ad; }
     .navigator {
       position: fixed; z-index: 2; left: 50%; bottom: max(16px, env(safe-area-inset-bottom));
@@ -84,7 +90,7 @@
     @media (max-width: 640px) {
       header { gap: 8px; padding-left: 12px; padding-right: 12px; }
       header button { min-width: 40px; min-height: 40px; padding: 6px 9px; }
-      main { padding: 12px 12px 88px; }
+      #surface { padding: 12px 12px 88px; }
       #gesture-hint { display: none; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -107,8 +113,10 @@
       <ol id="frame-list"></ol>
     </aside>
     <main id="stage" class="fit">
-      <div id="loading">첫 프레임을 기다리는 중…</div>
-      <img id="preview" alt="Pencil frame" hidden>
+      <div id="surface">
+        <div id="loading">첫 프레임을 기다리는 중…</div>
+        <img id="preview" alt="Pencil frame" draggable="false" hidden>
+      </div>
     </main>
   </div>
   <nav class="navigator" aria-label="프레임 이동">
@@ -117,7 +125,7 @@
     <button id="next" type="button" aria-label="다음 프레임" disabled>↓</button>
     <button id="reload" type="button" aria-label="다시 불러오기">↻</button>
   </nav>
-  <div id="gesture-hint">스와이프 · j/k · ↑/↓ · r</div>
+  <div id="gesture-hint">핀치 줌 · 확대 시 드래그 · j/k · ↑/↓ · r</div>
   <script>
     const stage = document.getElementById('stage');
     const image = document.getElementById('preview');
@@ -134,19 +142,90 @@
     let frameNamesKey = '';
     let selectedPosition = 0;
     let requestedImageKey = '';
-    let pointerStart = null;
-    let didSwipe = false;
+    let zoomMode = 'fit';
+    let zoom = 1;
+    let baseWidth = 0;
+    let baseHeight = 0;
+    let swipeStart = null;
+    let dragStart = null;
+    let pinchDistance = 0;
+    let suppressClick = false;
+    let safariGestureZoom = 1;
+    const pointers = new Map();
+
+    const EXPORT_SCALE = 2;
+    const MIN_ZOOM = .05;
+    const MAX_ZOOM = 4;
+
+    function clampZoom(value) {
+      return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, value));
+    }
+
+    function currentZoom() {
+      if (zoomMode === 'fit' && baseWidth && !image.hidden) {
+        return image.getBoundingClientRect().width / baseWidth;
+      }
+      return zoom;
+    }
+
+    function updateModeButtons() {
+      fit.classList.toggle('active', zoomMode === 'fit');
+      actual.classList.toggle(
+        'active', zoomMode === 'zoomed' && Math.abs(zoom - 1) < .001
+      );
+    }
 
     function setMode(mode) {
-      stage.className = mode;
-      fit.classList.toggle('active', mode === 'fit');
-      actual.classList.toggle('active', mode === 'actual');
+      zoomMode = mode;
+      stage.classList.toggle('fit', mode === 'fit');
+      stage.classList.toggle('zoomed', mode === 'zoomed');
+      stage.classList.remove('dragging');
+      if (mode === 'fit') {
+        image.style.removeProperty('width');
+        image.style.removeProperty('height');
+        stage.scrollLeft = 0;
+        stage.scrollTop = 0;
+      }
+      updateModeButtons();
     }
     fit.onclick = () => setMode('fit');
-    actual.onclick = () => setMode('actual');
+    actual.onclick = () => setZoom(1);
     image.onclick = () => {
-      if (!didSwipe) setMode(stage.className === 'fit' ? 'actual' : 'fit');
+      if (suppressClick) return;
+      if (zoomMode === 'fit') setZoom(1);
+      else setMode('fit');
     };
+
+    function setZoom(nextZoom, focalPoint) {
+      if (!baseWidth || !baseHeight || image.hidden) return;
+      const focal = focalPoint || {
+        x: stage.getBoundingClientRect().left + stage.clientWidth / 2,
+        y: stage.getBoundingClientRect().top + stage.clientHeight / 2,
+      };
+      const before = image.getBoundingClientRect();
+      const xRatio = before.width
+        ? Math.min(1, Math.max(0, (focal.x - before.left) / before.width))
+        : .5;
+      const yRatio = before.height
+        ? Math.min(1, Math.max(0, (focal.y - before.top) / before.height))
+        : .5;
+
+      zoom = clampZoom(nextZoom);
+      zoomMode = 'zoomed';
+      stage.classList.remove('fit');
+      stage.classList.add('zoomed');
+      image.style.width = `${baseWidth * zoom}px`;
+      image.style.height = `${baseHeight * zoom}px`;
+      updateModeButtons();
+
+      const after = image.getBoundingClientRect();
+      stage.scrollLeft += after.left + after.width * xRatio - focal.x;
+      stage.scrollTop += after.top + after.height * yRatio - focal.y;
+    }
+
+    function zoomBy(factor, focalPoint) {
+      setZoom(currentZoom() * factor, focalPoint);
+    }
 
     async function send(command, index) {
       try {
@@ -203,27 +282,116 @@
       if (key === 'j' || key === 'arrowdown') send('next');
       else if (key === 'k' || key === 'arrowup') send('previous');
       else if (key === 'r' || key === 'enter') send('reload');
+      else if (key === '+' || key === '=') zoomBy(1.15);
+      else if (key === '-') zoomBy(1 / 1.15);
+      else if (key === '0') setZoom(1);
+      else if (key === 'f') setMode('fit');
       else if (key === 'q') send('close');
       else return;
       event.preventDefault();
     });
 
+    function pointerPair() {
+      const values = [...pointers.values()];
+      if (values.length < 2) return null;
+      const [first, second] = values;
+      return {
+        distance: Math.hypot(second.x - first.x, second.y - first.y),
+        center: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 },
+      };
+    }
+
+    stage.addEventListener('wheel', event => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      suppressClick = true;
+      zoomBy(Math.exp(-event.deltaY * .01), { x: event.clientX, y: event.clientY });
+      clearTimeout(stage.zoomClickTimer);
+      stage.zoomClickTimer = setTimeout(() => { suppressClick = false; }, 120);
+    }, { passive: false });
+
     stage.addEventListener('pointerdown', event => {
-      pointerStart = { x: event.clientX, y: event.clientY };
-      didSwipe = false;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      stage.setPointerCapture?.(event.pointerId);
+      const pair = pointerPair();
+      if (pair) {
+        pinchDistance = pair.distance;
+        swipeStart = null;
+        dragStart = null;
+        suppressClick = true;
+      } else if (zoomMode === 'zoomed') {
+        dragStart = {
+          x: event.clientX, y: event.clientY,
+          left: stage.scrollLeft, top: stage.scrollTop,
+        };
+      } else {
+        swipeStart = { x: event.clientX, y: event.clientY };
+      }
     });
-    stage.addEventListener('pointerup', event => {
-      if (!pointerStart) return;
-      const dx = event.clientX - pointerStart.x;
-      const dy = event.clientY - pointerStart.y;
-      pointerStart = null;
-      if (stage.className !== 'fit') return;
-      if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
-      didSwipe = true;
-      send(dx < 0 ? 'next' : 'previous');
-      setTimeout(() => { didSwipe = false; }, 0);
+
+    stage.addEventListener('pointermove', event => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const pair = pointerPair();
+      if (pair && pinchDistance) {
+        event.preventDefault();
+        zoomBy(pair.distance / pinchDistance, pair.center);
+        pinchDistance = pair.distance;
+        suppressClick = true;
+        return;
+      }
+      if (!dragStart || zoomMode !== 'zoomed') return;
+      const dx = event.clientX - dragStart.x;
+      const dy = event.clientY - dragStart.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) {
+        suppressClick = true;
+        stage.classList.add('dragging');
+      }
+      stage.scrollLeft = dragStart.left - dx;
+      stage.scrollTop = dragStart.top - dy;
     });
-    stage.addEventListener('pointercancel', () => { pointerStart = null; });
+
+    function finishPointer(event, cancelled = false) {
+      const start = swipeStart;
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) pinchDistance = 0;
+      if (!pointers.size) {
+        dragStart = null;
+        swipeStart = null;
+        stage.classList.remove('dragging');
+      }
+      if (!cancelled && start && zoomMode === 'fit' && !suppressClick) {
+        const dx = event.clientX - start.x;
+        const dy = event.clientY - start.y;
+        if (Math.abs(dx) >= 50 && Math.abs(dx) >= Math.abs(dy) * 1.2) {
+          suppressClick = true;
+          send(dx < 0 ? 'next' : 'previous');
+        }
+      }
+      if (!pointers.size && suppressClick) {
+        setTimeout(() => { suppressClick = false; }, 0);
+      }
+    }
+
+    stage.addEventListener('pointerup', event => finishPointer(event));
+    stage.addEventListener('pointercancel', event => finishPointer(event, true));
+
+    // Safari emits gesture events for trackpad pinch instead of ctrl+wheel.
+    stage.addEventListener('gesturestart', event => {
+      event.preventDefault();
+      safariGestureZoom = currentZoom();
+      suppressClick = true;
+    }, { passive: false });
+    stage.addEventListener('gesturechange', event => {
+      event.preventDefault();
+      setZoom(safariGestureZoom * event.scale, {
+        x: event.clientX, y: event.clientY,
+      });
+    }, { passive: false });
+    stage.addEventListener('gestureend', event => {
+      event.preventDefault();
+      setTimeout(() => { suppressClick = false; }, 0);
+    }, { passive: false });
 
     async function refresh() {
       try {
@@ -256,6 +424,15 @@
             loadingRevision = null;
             loading.hidden = true;
             image.hidden = false;
+            baseWidth = image.naturalWidth / EXPORT_SCALE;
+            baseHeight = image.naturalHeight / EXPORT_SCALE;
+            if (zoomMode === 'zoomed') {
+              image.style.width = `${baseWidth * zoom}px`;
+              image.style.height = `${baseHeight * zoom}px`;
+            } else {
+              image.style.removeProperty('width');
+              image.style.removeProperty('height');
+            }
           };
           image.onerror = () => { loadingRevision = null; };
           image.src = `frame.png?v=${requestedRevision}`;

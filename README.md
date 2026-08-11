@@ -103,7 +103,9 @@ export CPEN_AGENT=claude      # 기본 에이전트 고정 (선택 단계가 사
 
 Herdr 0.7.5 이상이 필요하다. Tailscale이 실행 중이면 해당 인터페이스의 임시 포트에만
 서버를 열고 토큰이 포함된 URL을 표시한다. 같은 tailnet의 브라우저에서 URL을 열면
-원본 비율의 이미지를 Fit 또는 100%로 볼 수 있다. Tailscale을 찾지 못하면 localhost
+이미지를 Fit 또는 디자인 좌표 기준 100%로 볼 수 있다. 트랙패드나 터치 화면에서는
+핀치로 연속 확대·축소하고 확대된 이미지를 드래그해 이동한다. 키보드 `+`/`-`로도
+배율을 바꾸고 `0`은 100%, `f`는 Fit으로 돌아간다. Tailscale을 찾지 못하면 localhost
 주소와 SSH 터널 명령을 대신 표시한다.
 
 macOS와 Linux 모두 파일 URL의 기본 앱으로 `.pen` 파일을 열고, preview는 Pencil

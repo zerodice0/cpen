@@ -626,6 +626,27 @@ class HerdrPreviewTests(unittest.TestCase):
         self.assertIn("width: 280px", html)
         self.assertIn("left: calc(50% + 140px)", html)
 
+    def test_browser_preview_supports_local_gesture_zoom_and_pan(self):
+        html = MODULE.PREVIEW_HTML.read_text()
+        self.assertIn("touch-action: none", html)
+        self.assertIn('draggable="false"', html)
+        self.assertIn("const EXPORT_SCALE = 2", html)
+        self.assertIn("image.naturalWidth / EXPORT_SCALE", html)
+        self.assertIn("function setZoom(nextZoom, focalPoint)", html)
+        self.assertIn("Math.exp(-event.deltaY * .01)", html)
+        self.assertIn("{ passive: false }", html)
+        self.assertIn("function pointerPair()", html)
+        self.assertIn("pair.distance / pinchDistance", html)
+        self.assertIn("stage.classList.add('dragging')", html)
+        self.assertIn("'gesturechange'", html)
+
+    def test_browser_preview_keeps_fit_swipe_separate_from_zoom_pan(self):
+        html = MODULE.PREVIEW_HTML.read_text()
+        self.assertIn("zoomMode === 'fit' && !suppressClick", html)
+        self.assertIn("zoomMode !== 'zoomed'", html)
+        self.assertIn("setZoom(1)", html)
+        self.assertIn("setMode('fit')", html)
+
     def test_export_png_returns_desktop_image(self):
         mcp = object.__new__(MODULE.PencilMCP)
         png = b"\x89PNG\r\n\x1a\npreview"
