@@ -305,14 +305,24 @@ def build_prompt(
     lines = [
         f"Pencil 작업 세션: {session}",
         f"작업 대상 .pen 파일: {pen_file}",
-        "Pencil MCP 도구를 호출할 때 filePath 에는 항상 위 절대 경로를 넘기세요.",
+        f"filePath 인자를 받는 모든 Pencil MCP 호출에는 반드시 이 절대 경로를 그대로 넘기세요: {pen_file}",
         "수정은 위 파일을 중심으로 하되, 다른 세션도 같은 문서를 변경할 수 있다고 가정하세요.",
         "활성 캔버스(get_app_state)는 Pencil 앱 전역 공유라 다른 에이전트 세션 때문에 위 경로와 다를 수 있습니다. 그것을 이유로 멈추지 말고 filePath 로 작업하세요.",
         ".pen 파일은 Pencil MCP로만 읽고 수정하세요.",
-        *concurrent,
     ]
     if agent == "codex":
-        lines.append(f"첫 응답 마지막에 '세션 이름 지정: /rename {session}' 을 안내하세요.")
+        lines.extend(
+            [
+                "Codex에서는 작업을 시작하기 전에 tool discovery로 지연 로딩된 `mcp__pencil__*` 도구(예: `mcp__pencil__get_app_state`)를 검색하고, 발견한 Pencil MCP 도구를 직접 호출하세요.",
+                "Pencil 도구가 기본 목록에 바로 보이지 않아도 MCP가 없다고 판단하거나 headless 경로로 우회하지 마세요.",
+                "`pen interactive`(특히 `--app headless`)를 실행하지 말고, Read/cat/rg/Python 등 일반 파일 도구로 .pen 내용을 읽거나 수정하지 마세요.",
+            ]
+        )
+    lines.extend(concurrent)
+    if agent == "codex":
+        lines.append(
+            f"첫 응답 마지막에 '세션 이름 지정: /rename {session}' 을 안내하세요."
+        )
     return "\n".join(lines)
 
 

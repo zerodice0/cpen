@@ -28,7 +28,7 @@ import uuid
 
 
 PLUGIN_ID = "zerodice0.cpen"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.6.1"
 CPEN_RUNNER = Path(__file__).resolve().parents[1] / "bin" / "cpen"
 FRAME_QUERY = (
     'Get(document,(n,c)=>c.depth===0 && n.type==="frame" && !n.reusable '
@@ -317,6 +317,71 @@ def pen_file_rows(paths: list[str], root: str, exclude_pane: str = "") -> list[s
             label += f"  ⚠ 연결됨: {panes}"
         rows.append(f"{path}\t{label}")
     return rows
+
+
+def pencil_socket_path() -> Path:
+    configured = os.environ.get("CPEN_PENCIL_SOCKET")
+    return Path(configured).expanduser() if configured else (
+        Path.home() / ".pencil/socket/pencil-desktop.sock"
+    )
+
+
+def pencil_open_command(pen_file: str | Path) -> list[str]:
+    override = os.environ.get("CPEN_PENCIL_APP")
+    if override:
+        return [override, str(Path(pen_file).resolve())]
+    launcher = next(
+        (
+            path
+            for name in ("pen-desktop", "xdg-open", "open")
+            if (path := shutil.which(name))
+        ),
+        None,
+    )
+    return [launcher, str(Path(pen_file).resolve())] if launcher else []
+
+
+def wait_for_pencil_desktop(pen_file: str, timeout: float = 22) -> None:
+    target = str(Path(pen_file).resolve())
+    deadline = time.monotonic() + timeout
+    last_error = "desktop socket에 연결할 수 없습니다"
+    while True:
+        mcp = None
+        try:
+            mcp = PencilMCP()
+            # A socket can exist before the selected document has finished loading.
+            # Query the exact file so preview and agent startup cannot race that load.
+            mcp.frames(target)
+            return
+        except (OSError, RuntimeError, json.JSONDecodeError) as error:
+            last_error = str(error)
+        finally:
+            if mcp is not None:
+                mcp.close()
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Pencil desktop과 선택한 문서가 준비되지 않았습니다 "
+                f"({pencil_socket_path()}): {last_error}"
+            )
+        time.sleep(0.1)
+
+
+def prepare_pencil_desktop(pen_file: str) -> None:
+    target = str(Path(pen_file).resolve())
+    command = pencil_open_command(target)
+    if not command:
+        raise RuntimeError(
+            "Pencil desktop launcher를 찾지 못했습니다 "
+            "(CPEN_PENCIL_APP, pen-desktop, xdg-open 또는 open)"
+        )
+    try:
+        result = subprocess.run(command, text=True, capture_output=True)
+    except OSError as error:
+        raise RuntimeError(f"Pencil desktop으로 파일을 열지 못했습니다: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        raise RuntimeError(f"Pencil desktop으로 파일을 열지 못했습니다: {detail}")
+    wait_for_pencil_desktop(target)
 
 
 def wait_for_ready(path: Path, timeout: float = 22) -> bool:
@@ -617,6 +682,7 @@ def launch_session() -> int:
     tab_id = ""
     left_id = ""
     try:
+        prepare_pencil_desktop(pen_file)
         created = run_json(
             "tab", "create", "--workspace", workspace, "--cwd", cwd,
             "--label", label, "--no-focus",
@@ -661,9 +727,7 @@ def launch_session() -> int:
 
 class PencilMCP:
     def __init__(self) -> None:
-        path = os.environ.get("CPEN_PENCIL_SOCKET") or str(
-            Path.home() / ".pencil/socket/pencil-desktop.sock"
-        )
+        path = str(pencil_socket_path())
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.socket.settimeout(20)
         self.buffer = b""

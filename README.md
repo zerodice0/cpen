@@ -6,7 +6,9 @@ Pencil `.pen` 파일을 골라 Pencil 데스크톱 앱으로 열고, 그 파일�
 `.pen` 은 암호화 포맷이라 일반 파일 도구로 못 읽고 Pencil MCP 를 거쳐야 한다.
 그래서 "어떤 파일을 작업 중인지" 를 셸이 확인할 수 없는데, `cpen` 은 이걸
 **에이전트에게 넘기는 프롬프트 계약**으로 해결한다 — 파일 대상 Pencil MCP 도구의
-`filePath` 를 활성 캔버스가 아니라 절대 경로로 고정한다.
+`filePath` 를 활성 캔버스가 아니라 절대 경로로 고정한다. Codex에는 기본 도구 목록에
+바로 보이지 않는 `mcp__pencil__*`도 tool discovery로 찾아 직접 사용하게 하고,
+`pen interactive --app headless`나 일반 파일 도구로 우회하지 못하게 명시한다.
 
 ## 요구사항
 
@@ -37,6 +39,13 @@ args = ["--app", "desktop", "--agent", "codexCLI"]
 Linux에서도 `--app desktop`인 비-Cursor Pencil MCP만 허용한다. 이 정책은 `cpen -a
 codex`의 실행 전 검사와 테스트로 유지하며, 설정이 어긋나면 Pen 앱이나 Codex를 띄우기
 전에 실패한다.
+
+Codex 초기 프롬프트는 지연 로딩된 `mcp__pencil__*` 도구를 tool discovery로 먼저 찾은
+뒤 직접 호출하라는 계약을 포함한다. `filePath` 인자를 받는 호출에는 선택한 `.pen`의
+절대 경로를 그대로 전달해야 한다. `.pen`을 Read, `cat`, `rg`, Python 같은 일반 파일
+도구로 읽거나 수정하는 것과 `pen interactive`/headless를 MCP 대체 경로로 쓰는 것은
+금지한다. `pen interactive --app desktop`은 에이전트 작업 경로가 아니라 아래의 명시적
+저장 훅에서만 사용한다.
 
 ## 설치
 
@@ -113,6 +122,12 @@ macOS와 Linux 모두 파일 URL의 기본 앱으로 `.pen` 파일을 열고, pr
 써야 하면 `CPEN_PENCIL_APP`, 기본 위치가 아닌 desktop socket을 쓰면
 `CPEN_PENCIL_SOCKET`에 각각 실행 경로와 socket 경로를 지정한다.
 
+`Open Pencil Session`은 파일과 에이전트를 고른 뒤 선택 파일을 launcher로 정확히 한 번
+연다. 이어서 desktop socket handshake와 선택한 절대 `filePath`의 MCP 조회가 성공할
+때까지 기다리고, 그 다음에만 preview와 에이전트를 순서대로 시작한다. 준비에 실패하면
+preview/에이전트/탭을 만들지 않고 오류를 표시한다. 에이전트 프로세스에는
+`CPEN_SKIP_OPEN=1`을 넘기므로 같은 launch에서 파일을 두 번 열지 않는다.
+
 ```sh
 herdr plugin link /absolute/path/to/cpen
 ```
@@ -123,8 +138,9 @@ URL을 브라우저에 붙여 넣는다. `j/k` 또는 방향키로 프레임을 
 `q`로 미리보기를 종료한다. 브라우저는 선택된 프레임이 바뀌면 자동 갱신된다. 같은
 방식으로 탭을 여러 개 열 수 있고 각 preview는 서로 다른 포트와 토큰을 사용한다.
 이 시스템의 설정에서는 Ghostty에서 `herdr`를 실행하고 `Ctrl+P`, `p`를 차례로 누른다.
-preview agent는 절대 `filePath`로 문서에 연결하므로 Pencil 창을 앞으로 가져오지 않고
-현재 터미널 포커스를 유지한다.
+launcher가 선택 파일을 열 때 Pencil 창이 잠시 앞으로 올 수 있다. 준비와 pane 시작이
+끝나면 Herdr는 새 탭에 focus를 요청하며, 이후 preview와 에이전트의 MCP 호출은 절대
+`filePath`로 연결하므로 Pencil 창을 다시 앞으로 가져오지 않는다.
 
 이미 `cpen`으로 실행 중인 Codex/Claude pane에는 미리보기만 붙일 수 있다. 대상 pane에
 포커스를 두고 `Toggle Pencil Preview`를 실행한다. 이 시스템에서는 `Ctrl+P`, `i`를
@@ -194,6 +210,9 @@ Pencil MCP 호출 대상은 활성 창이 아니라 절대 `filePath` 로 고정
 - Cursor 등 `cpen` 밖의 MCP 클라이언트나 사람이 직접 수정하는 것은 감지하지 못한다.
 - 안내는 프롬프트 계약이므로 에이전트가 잘못 판단하면 변경이 서로 간섭할 수 있다.
 - Pencil 앱 자체가 같은 파일의 변경을 병합하거나 직렬화해 주는 것은 아니다.
+- Linux에서는 `.pen`의 기본 앱이나 `CPEN_PENCIL_APP`이 Pencil desktop을 실제로 실행할
+  수 있어야 한다. `pencil-cli.sock`만 있는 headless/CLI 상태는 준비 완료로 인정하지
+  않으며, desktop socket이 제한 시간 안에 생기지 않으면 세션 시작을 중단한다.
 
 ## Pencil 창 수동 포커스
 
@@ -222,9 +241,10 @@ PYTHONPYCACHEPREFIX=/tmp/cpen-pycache python3 test/run.py
 ```
 
 테스트 runner와 테스트 구현은 모두 Python 표준 라이브러리만 사용하며 Fish 실행 파일을
-호출하지 않는다. 두 OS의 공통 분기와 가짜 Unix socket protocol을 검증한다. macOS에서는
-공식 CLI 저장과 실제 desktop socket preview도 확인했다. Linux의 실제 Pencil 데스크톱
-연결은 별도 Linux 호스트에서 확인해야 한다.
+호출하지 않는다. 두 OS의 공통 분기, 가짜 Unix socket protocol, desktop 준비가
+preview/agent보다 앞서는 launch 순서, 준비 실패 시 조기 중단, Codex tool discovery
+프롬프트 계약을 검증한다. macOS에서는 공식 CLI 저장과 실제 desktop socket preview도
+확인했다. Linux의 실제 Pencil 데스크톱 연결은 별도 Linux 호스트에서 확인해야 한다.
 
 ## 라이선스
 

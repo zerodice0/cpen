@@ -2,6 +2,7 @@
 
 import base64
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -115,6 +116,148 @@ class HerdrPreviewTests(unittest.TestCase):
             ready = Path(directory, "ready")
             ready.touch()
             self.assertTrue(MODULE.wait_for_ready(ready, timeout=0))
+
+    def test_prepare_pencil_desktop_opens_once_then_waits_for_exact_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pen_file = Path(directory) / "design.pen"
+            pen_file.touch()
+            completed = mock.Mock(returncode=0, stderr="")
+            command = ["/usr/bin/xdg-open", str(pen_file.resolve())]
+            with mock.patch.object(
+                MODULE, "pencil_open_command", return_value=command
+            ), mock.patch.object(
+                MODULE.subprocess, "run", return_value=completed
+            ) as run, mock.patch.object(
+                MODULE, "wait_for_pencil_desktop"
+            ) as wait:
+                MODULE.prepare_pencil_desktop(str(pen_file))
+        run.assert_called_once_with(command, text=True, capture_output=True)
+        wait.assert_called_once_with(str(pen_file.resolve()))
+
+    def test_desktop_readiness_queries_the_selected_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pen_file = Path(directory) / "design.pen"
+            pen_file.touch()
+            mcp = mock.Mock()
+            mcp.frames.return_value = []
+            with mock.patch.object(MODULE, "PencilMCP", return_value=mcp):
+                MODULE.wait_for_pencil_desktop(str(pen_file), timeout=0)
+        mcp.frames.assert_called_once_with(str(pen_file.resolve()))
+        mcp.close.assert_called_once_with()
+
+    def test_launch_prepares_desktop_before_preview_and_agent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            environment = {
+                "CPEN_BINDING_DIR": str(root / "bindings"),
+                "CPEN_HERDR_CWD": str(root),
+                "CPEN_HERDR_WORKSPACE": "w1",
+            }
+            events = []
+
+            def run_json(*args):
+                events.append(args[:2])
+                if args[:2] == ("tab", "create"):
+                    return {
+                        "result": {
+                            "tab": {"tab_id": "w1:t2"},
+                            "root_pane": {"pane_id": "w1:p2"},
+                        }
+                    }
+                if args[:2] == ("pane", "split"):
+                    return {"result": {"pane": {"pane_id": "w1:p3"}}}
+                if args[:2] == ("tab", "focus"):
+                    return {"result": {}}
+                raise AssertionError(args)
+
+            with mock.patch.dict(
+                MODULE.os.environ, environment, clear=False
+            ), mock.patch.object(
+                MODULE,
+                "choose",
+                side_effect=[f"{pen_file.resolve()}\tdesign.pen", "codex"],
+            ), mock.patch.object(
+                MODULE.shutil,
+                "which",
+                side_effect=lambda name: f"/usr/bin/{name}",
+            ), mock.patch.object(
+                MODULE,
+                "prepare_pencil_desktop",
+                side_effect=lambda path: events.append(("desktop", path)),
+            ) as prepare, mock.patch.object(
+                MODULE, "run_json", side_effect=run_json
+            ), mock.patch.object(
+                MODULE,
+                "start_preview",
+                side_effect=lambda pane, path: events.append(("preview", path)),
+            ) as preview, mock.patch.object(
+                MODULE,
+                "pane_run",
+                side_effect=lambda pane, command: events.append(("agent", command)),
+            ) as pane_run:
+                self.assertEqual(MODULE.launch_session(), 0)
+
+            self.assertEqual(events[0], ("desktop", str(pen_file.resolve())))
+            order = [
+                ".".join(event) if event[0] in ("tab", "pane") else event[0]
+                for event in events
+            ]
+            self.assertEqual(
+                order,
+                [
+                    "desktop",
+                    "tab.create",
+                    "pane.split",
+                    "preview",
+                    "agent",
+                    "tab.focus",
+                ],
+            )
+            prepare.assert_called_once_with(str(pen_file.resolve()))
+            preview.assert_called_once_with("w1:p3", str(pen_file.resolve()))
+            command = pane_run.call_args.args[1]
+            self.assertEqual(command[:2], ["env", "CPEN_SKIP_OPEN=1"])
+
+    def test_launch_stops_before_creating_a_tab_when_desktop_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pen_file = root / "design.pen"
+            pen_file.touch()
+            environment = {
+                "CPEN_BINDING_DIR": str(root / "bindings"),
+                "CPEN_HERDR_CWD": str(root),
+                "CPEN_HERDR_WORKSPACE": "w1",
+            }
+            with mock.patch.dict(
+                MODULE.os.environ, environment, clear=False
+            ), mock.patch.object(
+                MODULE,
+                "choose",
+                side_effect=[f"{pen_file.resolve()}\tdesign.pen", "codex"],
+            ), mock.patch.object(
+                MODULE.shutil, "which", return_value="/usr/bin/codex"
+            ), mock.patch.object(
+                MODULE,
+                "prepare_pencil_desktop",
+                side_effect=RuntimeError("desktop socket unavailable"),
+            ), mock.patch.object(
+                MODULE, "run_json"
+            ) as run_json, mock.patch.object(
+                MODULE, "start_preview"
+            ) as preview, mock.patch.object(
+                MODULE, "pane_run"
+            ) as pane_run, mock.patch.object(
+                MODULE.time, "sleep"
+            ), mock.patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as error:
+                self.assertEqual(MODULE.launch_session(), 1)
+            self.assertIn("desktop socket unavailable", error.getvalue())
+            run_json.assert_not_called()
+            preview.assert_not_called()
+            pane_run.assert_not_called()
 
     def test_process_info_extracts_cpen_file(self):
         info = {

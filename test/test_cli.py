@@ -47,7 +47,15 @@ class CpenCliTests(unittest.TestCase):
             open_pencil.assert_called_once_with(pen_file.resolve())
             prompt = run_agent.call_args.args[-1]
             self.assertIn(f"작업 대상 .pen 파일: {pen_file.resolve()}", prompt)
-            self.assertIn("filePath 에는 항상 위 절대 경로", prompt)
+            self.assertIn(
+                f"이 절대 경로를 그대로 넘기세요: {pen_file.resolve()}", prompt
+            )
+            self.assertIn("tool discovery", prompt)
+            self.assertIn("`mcp__pencil__*`", prompt)
+            self.assertIn("`mcp__pencil__get_app_state`", prompt)
+            self.assertIn("`pen interactive`", prompt)
+            self.assertIn("`--app headless`", prompt)
+            self.assertIn("일반 파일 도구", prompt)
             self.assertIn("/rename 직접 지정", prompt)
             release.assert_called_once()
 

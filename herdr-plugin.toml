@@ -1,6 +1,6 @@
 id = "zerodice0.cpen"
 name = "cpen Pencil Session"
-version = "0.6.0"
+version = "0.6.1"
 min_herdr_version = "0.7.5"
 description = "Open a 2:1 agent and live Pencil preview tab."
 platforms = ["macos", "linux"]
