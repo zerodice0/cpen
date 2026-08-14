@@ -23,7 +23,9 @@ class HerdrSessionTests(unittest.TestCase):
         try:
             MODULE.os.environ["CPEN_HERDR_CWD"] = "/tmp"
             MODULE.os.environ["CPEN_HERDR_WORKSPACE"] = "w9"
-            self.assertEqual(MODULE.invocation_values(), ("/private/tmp", "w9"))
+            self.assertEqual(
+                MODULE.invocation_values(), (str(Path("/tmp").resolve()), "w9")
+            )
         finally:
             MODULE.os.environ.clear()
             MODULE.os.environ.update(old)
