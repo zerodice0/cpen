@@ -100,72 +100,49 @@ export CPEN_AGENT=claude      # 기본 에이전트 고정 (선택 단계가 사
 에이전트는 `-a` > `$CPEN_AGENT` > 대화형 선택 순으로 정해진다.
 세션 이름을 생략하면 `pen:<파일명>` 이 쓰인다.
 
-## Herdr Pencil Session (prototype)
+## Herdr Pencil Session
 
-`herdr-plugin.toml` 은 선택한 `.pen` 파일을 하나의 Herdr 탭으로 연다.
+`herdr-plugin.toml`은 선택한 `.pen` 파일을 Pencil desktop으로 열고, 그 파일을 작업
+대상으로 하는 Codex 또는 Claude 단일 pane 탭을 만든다. Herdr 0.7.5 이상이 필요하다.
 
-- 왼쪽 2/3: 기존 `cpen`으로 시작한 Codex 또는 Claude
-- 오른쪽 1/3: 고해상도 브라우저 주소와 프레임 선택 목록
-- 파일이 저장되어 mtime이 바뀌면 선택 프레임을 자동 갱신
-- Pencil desktop socket이 2배 PNG를 반환하면 메모리에만 보관해 브라우저에 제공한다.
-  preview 종료 시 HTTP 서버와 메모리 캐시를 정리한다.
-
-Herdr 0.7.5 이상이 필요하다. Tailscale이 실행 중이면 해당 인터페이스의 임시 포트에만
-서버를 열고 토큰이 포함된 URL을 표시한다. 같은 tailnet의 브라우저에서 URL을 열면
-이미지를 Fit 또는 디자인 좌표 기준 100%로 볼 수 있다. 트랙패드나 터치 화면에서는
-핀치로 연속 확대·축소하고 확대된 이미지를 드래그해 이동한다. 키보드 `+`/`-`로도
-배율을 바꾸고 `0`은 100%, `f`는 Fit으로 돌아간다. Tailscale을 찾지 못하면 localhost
-주소와 SSH 터널 명령을 대신 표시한다.
-
-macOS와 Linux 모두 파일 URL의 기본 앱으로 `.pen` 파일을 열고, preview는 Pencil
-데스크톱의 `~/.pencil/socket/pencil-desktop.sock`에 직접 연결한다. 별도 launcher를
-써야 하면 `CPEN_PENCIL_APP`, 기본 위치가 아닌 desktop socket을 쓰면
+macOS와 Linux 모두 파일 URL의 기본 앱으로 `.pen` 파일을 연다. 별도 launcher를 써야
+하면 `CPEN_PENCIL_APP`, 기본 위치가 아닌 desktop socket을 쓰면
 `CPEN_PENCIL_SOCKET`에 각각 실행 경로와 socket 경로를 지정한다.
 
-`Open Pencil Session`은 파일과 에이전트를 고른 뒤 선택 파일을 launcher로 정확히 한 번
-연다. 이어서 desktop socket handshake와 선택한 절대 `filePath`의 MCP 조회가 성공할
-때까지 기다리고, 그 다음에만 preview와 에이전트를 순서대로 시작한다. 준비에 실패하면
-preview/에이전트/탭을 만들지 않고 오류를 표시한다. 에이전트 프로세스에는
-`CPEN_SKIP_OPEN=1`을 넘기므로 같은 launch에서 파일을 두 번 열지 않는다.
+`Open Pencil Session`은 파일과 에이전트를 고른 뒤 다음 순서로 실행한다.
+
+1. 선택 파일을 launcher로 정확히 한 번 연다.
+2. `~/.pencil/socket/pencil-desktop.sock` handshake와 선택한 절대 `filePath`의 MCP
+   조회가 성공할 때까지 기다린다.
+3. 하나의 Herdr 탭과 agent pane을 만들고 새 탭에 focus를 요청한다.
+
+준비에 실패하면 agent나 탭을 만들지 않고 오류를 표시한다. 에이전트 프로세스에는
+`CPEN_SKIP_OPEN=1`을 넘기므로 같은 launch에서 파일을 두 번 열지 않는다. launcher가
+선택 파일을 열 때 Pencil 창이 잠시 앞으로 올 수 있지만, 이후 에이전트의 MCP 호출은
+절대 `filePath`를 사용하므로 Pencil 창을 다시 앞으로 가져오지 않는다.
 
 ```sh
 herdr plugin link /absolute/path/to/cpen
 ```
 
 설정된 단축키나 Herdr plugin action에서 `Open Pencil Session`을 실행한 뒤 파일과
-에이전트를 고른다. 우측 pane의 `미리보기 열기` 링크를 Ctrl-click하거나 함께 표시된
-URL을 브라우저에 붙여 넣는다. `j/k` 또는 방향키로 프레임을 바꾸고, `r`로 다시 읽으며,
-`q`로 미리보기를 종료한다. 브라우저는 선택된 프레임이 바뀌면 자동 갱신된다. 같은
-방식으로 탭을 여러 개 열 수 있고 각 preview는 서로 다른 포트와 토큰을 사용한다.
-이 시스템의 설정에서는 Ghostty에서 `herdr`를 실행하고 `Ctrl+P`, `p`를 차례로 누른다.
-launcher가 선택 파일을 열 때 Pencil 창이 잠시 앞으로 올 수 있다. 준비와 pane 시작이
-끝나면 Herdr는 새 탭에 focus를 요청하며, 이후 preview와 에이전트의 MCP 호출은 절대
-`filePath`로 연결하므로 Pencil 창을 다시 앞으로 가져오지 않는다.
+에이전트를 고른다. 이 시스템에서는 Ghostty에서 `herdr`를 실행하고 `Ctrl+P`, `p`를
+차례로 누른다.
 
-이미 `cpen`으로 실행 중인 Codex/Claude pane에는 미리보기만 붙일 수 있다. 대상 pane에
-포커스를 두고 `Toggle Pencil Preview`를 실행한다. 이 시스템에서는 `Ctrl+P`, `i`를
-차례로 누른다. 대상 pane의 오른쪽 1/3이 미리보기가 되며, 작은 2x2 레이아웃에서는
-선택 중인 프레임 한 줄만 표시하는 compact UI를 쓴다. 같은 단축키를 다시 누르거나
-미리보기에서 `q`를 누르면 미리보기만 닫히고 기존 에이전트 세션과 레이아웃은 유지된다.
-각 cpen pane별로 하나씩 독립적으로 붙일 수 있다.
+0.7.0부터 브라우저/HTTP preview와 `Toggle Pencil Preview`, `Attach Pencil File`,
+`Detach Pencil File` action은 제거됐다. 디자인 확인은 Pencil desktop에서 직접 한다.
 
-`cpen`으로 시작하지 않은 일반 Herdr pane에서 같은 action을 실행하면 `.pen`
-선택 popup을 열고 그 pane에 파일을 연결한 다음 미리보기를 붙인다. 연결은 cpen/Herdr
-state에 pane ID 기준으로 저장되므로 Codex/Claude에서 `/clear`하거나 에이전트를
-같은 pane에서 재시작해도 유지된다. Herdr 서버를 재시작하면 연결은 남지만 preview
-프로세스는 종료되므로 `Toggle Pencil Preview`로 다시 연다.
+각 agent pane의 파일 연결은 cpen/Herdr state에 pane ID 기준으로 저장된다. 이 binding은
+같은 `.pen`을 사용하는 다른 Herdr pane을 감지해 동시 작업 안내를 전달하고, pane이
+이동하거나 닫힐 때 함께 이동·정리하는 데만 사용한다.
 
-`Attach Pencil File`은 현재 pane의 연결 파일을 선택하거나 교체하고, `Detach Pencil
-File`은 연결과 미리보기를 함께 제거한다. pane을 닫으면 연결 기록도 자동으로
-정리된다.
-
-초기 프로토타입은 기존 `.pen` 선택만 지원한다. 새 문서 생성은 Pencil 앱에서 저장한 뒤
-선택하는 흐름으로 둔다.
+기존 `.pen` 선택만 지원한다. 새 문서 생성은 Pencil 앱에서 저장한 뒤 선택하는 흐름으로
+둔다.
 
 파일 탐색은 **git 루트** 기준이라 하위 디렉토리에서 실행해도 같은 목록이 나오고,
 에이전트도 git 루트에서 시작한다. git 저장소가 아니면 현재 디렉토리를 쓴다.
-`.pen` 을 gitignore 해두는 저장소가 있어 gitignore 여부와 상관없이 훑되,
-`build/` `.dart_tool/` `node_modules/` `Pods/` `.git/` `DerivedData/` 는 제외한다.
+`.pen`을 gitignore 해두는 저장소가 있어 gitignore 여부와 상관없이 훑되,
+`build/` `.dart_tool/` `node_modules/` `Pods/` `.git/` `DerivedData/`는 제외한다.
 
 ## 에이전트별 차이
 
@@ -241,10 +218,10 @@ PYTHONPYCACHEPREFIX=/tmp/cpen-pycache python3 test/run.py
 ```
 
 테스트 runner와 테스트 구현은 모두 Python 표준 라이브러리만 사용하며 Fish 실행 파일을
-호출하지 않는다. 두 OS의 공통 분기, 가짜 Unix socket protocol, desktop 준비가
-preview/agent보다 앞서는 launch 순서, 준비 실패 시 조기 중단, Codex tool discovery
-프롬프트 계약을 검증한다. macOS에서는 공식 CLI 저장과 실제 desktop socket preview도
-확인했다. Linux의 실제 Pencil 데스크톱 연결은 별도 Linux 호스트에서 확인해야 한다.
+호출하지 않는다. 두 OS의 공통 분기, 가짜 Unix socket protocol, desktop 준비 후
+단일 agent pane을 시작하는 순서, 준비 실패 시 조기 중단, Codex tool discovery 프롬프트
+계약을 검증한다. Linux의 실제 Pencil 데스크톱 연결은 별도 Linux 호스트에서 확인해야
+한다.
 
 ## 라이선스
 
