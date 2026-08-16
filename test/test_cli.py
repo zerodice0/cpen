@@ -217,12 +217,35 @@ class CpenCliTests(unittest.TestCase):
             with mock.patch.dict(MODULE.os.environ, {}, clear=True), mock.patch.object(
                 MODULE.shutil,
                 "which",
+                side_effect=lambda name: "/usr/bin/pen-desktop" if name == "pen-desktop" else None,
+            ):
+                self.assertEqual(
+                    MODULE.pencil_open_command(pen_file),
+                    ["/usr/bin/pen-desktop", "--file", str(pen_file)],
+                )
+            with mock.patch.dict(MODULE.os.environ, {}, clear=True), mock.patch.object(
+                MODULE.shutil,
+                "which",
                 side_effect=lambda name: "/usr/bin/open" if name == "open" else None,
             ):
                 self.assertEqual(
                     MODULE.pencil_open_command(pen_file),
                     ["/usr/bin/open", str(pen_file)],
                 )
+
+    def test_open_pencil_detaches_desktop_from_terminal(self):
+        command = ["/usr/bin/pen-desktop", "--file", "/tmp/a.pen"]
+        with mock.patch.object(
+            MODULE, "pencil_open_command", return_value=command
+        ), mock.patch.object(MODULE.subprocess, "Popen") as start:
+            self.assertTrue(MODULE.open_pencil(Path("/tmp/a.pen")))
+        start.assert_called_once_with(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
     def test_save_uses_official_pencil_cli_on_every_os(self):
         with tempfile.TemporaryDirectory() as directory:

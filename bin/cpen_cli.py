@@ -216,7 +216,11 @@ def pencil_open_command(pen_file: Path) -> list[str]:
         (path for name in ("pen-desktop", "xdg-open", "open") if (path := shutil.which(name))),
         None,
     )
-    return [launcher, str(pen_file)] if launcher else []
+    if not launcher:
+        return []
+    if Path(launcher).name == "pen-desktop":
+        return [launcher, "--file", str(pen_file)]
+    return [launcher, str(pen_file)]
 
 
 def open_pencil(pen_file: Path) -> bool:
@@ -224,7 +228,14 @@ def open_pencil(pen_file: Path) -> bool:
     if not command:
         return False
     try:
-        return subprocess.run(command).returncode == 0
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
     except OSError:
         return False
 

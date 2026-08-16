@@ -112,18 +112,53 @@ class HerdrSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pen_file = Path(directory) / "design.pen"
             pen_file.touch()
-            completed = mock.Mock(returncode=0, stderr="")
             command = ["/usr/bin/xdg-open", str(pen_file.resolve())]
             with mock.patch.object(
                 MODULE, "pencil_open_command", return_value=command
             ), mock.patch.object(
-                MODULE.subprocess, "run", return_value=completed
-            ) as run, mock.patch.object(
+                MODULE, "pencil_document_ready", return_value=False
+            ), mock.patch.object(
+                MODULE.subprocess, "Popen"
+            ) as start, mock.patch.object(
                 MODULE, "wait_for_pencil_desktop"
             ) as wait:
                 MODULE.prepare_pencil_desktop(str(pen_file))
-        run.assert_called_once_with(command, text=True, capture_output=True)
+        start.assert_called_once_with(
+            command,
+            stdin=MODULE.subprocess.DEVNULL,
+            stdout=MODULE.subprocess.DEVNULL,
+            stderr=MODULE.subprocess.DEVNULL,
+            start_new_session=True,
+        )
         wait.assert_called_once_with(str(pen_file.resolve()))
+
+    def test_prepare_uses_ready_document_without_relaunching_pen(self):
+        with mock.patch.object(
+            MODULE, "pencil_document_ready", return_value=True
+        ) as ready, mock.patch.object(MODULE.subprocess, "Popen") as start, mock.patch.object(
+            MODULE, "wait_for_pencil_desktop"
+        ) as wait:
+            MODULE.prepare_pencil_desktop("/tmp/design.pen")
+        ready.assert_called_once_with(str(Path("/tmp/design.pen").resolve()))
+        start.assert_not_called()
+        wait.assert_not_called()
+
+    def test_pen_desktop_uses_file_flag_required_for_cold_start(self):
+        with mock.patch.object(
+            MODULE.shutil,
+            "which",
+            side_effect=lambda name: (
+                "/usr/bin/pen-desktop" if name == "pen-desktop" else None
+            ),
+        ):
+            self.assertEqual(
+                MODULE.pencil_open_command("/tmp/design.pen"),
+                [
+                    "/usr/bin/pen-desktop",
+                    "--file",
+                    str(Path("/tmp/design.pen").resolve()),
+                ],
+            )
 
     def test_desktop_readiness_queries_the_selected_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -134,6 +169,16 @@ class HerdrSessionTests(unittest.TestCase):
             with mock.patch.object(MODULE, "PencilMCP", return_value=mcp):
                 MODULE.wait_for_pencil_desktop(str(pen_file), timeout=0)
         mcp.frames.assert_called_once_with(str(pen_file.resolve()))
+        mcp.close.assert_called_once_with()
+
+    def test_document_ready_uses_a_short_socket_timeout(self):
+        mcp = mock.Mock()
+        with mock.patch.object(
+            MODULE, "pencil_socket_path", return_value=Path(__file__)
+        ), mock.patch.object(MODULE, "PencilMCP", return_value=mcp) as client:
+            self.assertTrue(MODULE.pencil_document_ready("/tmp/design.pen"))
+        client.assert_called_once_with(timeout=1)
+        mcp.frames.assert_called_once_with(str(Path("/tmp/design.pen").resolve()))
         mcp.close.assert_called_once_with()
 
     def test_launch_prepares_desktop_then_starts_one_agent_pane(self):
@@ -200,7 +245,17 @@ class HerdrSessionTests(unittest.TestCase):
             self.assertEqual(binding["pen_file"], str(pen_file.resolve()))
             self.assertNotIn("preview_pane_id", binding)
 
-    def test_launch_stops_before_creating_a_tab_when_desktop_is_not_ready(self):
+    def test_missing_workspace_exits_cleanly_without_a_dead_popup(self):
+        with mock.patch.object(
+            MODULE, "invocation_values", return_value=("/tmp", "")
+        ), mock.patch.object(MODULE.time, "sleep") as sleep, mock.patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as error:
+            self.assertEqual(MODULE.launch_session(), 0)
+        self.assertIn("workspace", error.getvalue())
+        sleep.assert_called_once_with(3)
+
+    def test_handled_launch_error_exits_cleanly_without_a_dead_popup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pen_file = root / "design.pen"
@@ -231,7 +286,7 @@ class HerdrSessionTests(unittest.TestCase):
             ), mock.patch(
                 "sys.stderr", new_callable=io.StringIO
             ) as error:
-                self.assertEqual(MODULE.launch_session(), 1)
+                self.assertEqual(MODULE.launch_session(), 0)
             self.assertIn("desktop socket unavailable", error.getvalue())
             run_json.assert_not_called()
             pane_run.assert_not_called()

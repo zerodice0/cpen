@@ -280,7 +280,12 @@ def pencil_open_command(pen_file: str | Path) -> list[str]:
         ),
         None,
     )
-    return [launcher, str(Path(pen_file).resolve())] if launcher else []
+    if not launcher:
+        return []
+    target = str(Path(pen_file).resolve())
+    if Path(launcher).name == "pen-desktop":
+        return [launcher, "--file", target]
+    return [launcher, target]
 
 
 def wait_for_pencil_desktop(pen_file: str, timeout: float = 22) -> None:
@@ -290,7 +295,8 @@ def wait_for_pencil_desktop(pen_file: str, timeout: float = 22) -> None:
     while True:
         mcp = None
         try:
-            mcp = PencilMCP()
+            remaining = max(0.1, deadline - time.monotonic())
+            mcp = PencilMCP(timeout=min(1.0, remaining))
             # A socket can exist before the selected document has finished loading.
             # Query the exact file so agent startup cannot race that load.
             mcp.frames(target)
@@ -308,8 +314,25 @@ def wait_for_pencil_desktop(pen_file: str, timeout: float = 22) -> None:
         time.sleep(0.1)
 
 
+def pencil_document_ready(pen_file: str, timeout: float = 1) -> bool:
+    if not pencil_socket_path().exists():
+        return False
+    mcp = None
+    try:
+        mcp = PencilMCP(timeout=timeout)
+        mcp.frames(str(Path(pen_file).resolve()))
+        return True
+    except (OSError, RuntimeError, json.JSONDecodeError):
+        return False
+    finally:
+        if mcp is not None:
+            mcp.close()
+
+
 def prepare_pencil_desktop(pen_file: str) -> None:
     target = str(Path(pen_file).resolve())
+    if pencil_document_ready(target):
+        return
     command = pencil_open_command(target)
     if not command:
         raise RuntimeError(
@@ -317,12 +340,15 @@ def prepare_pencil_desktop(pen_file: str) -> None:
             "(CPEN_PENCIL_APP, pen-desktop, xdg-open 또는 open)"
         )
     try:
-        result = subprocess.run(command, text=True, capture_output=True)
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except OSError as error:
         raise RuntimeError(f"Pencil desktop으로 파일을 열지 못했습니다: {error}") from error
-    if result.returncode != 0:
-        detail = result.stderr.strip() or f"exit status {result.returncode}"
-        raise RuntimeError(f"Pencil desktop으로 파일을 열지 못했습니다: {detail}")
     wait_for_pencil_desktop(target)
 
 
@@ -330,13 +356,14 @@ def launch_session() -> int:
     cwd, workspace = invocation_values()
     if not workspace:
         print("cpen: Herdr workspace를 확인할 수 없습니다.", file=sys.stderr)
-        return 1
+        time.sleep(3)
+        return 0
 
     paths = find_pen_files(cwd)
     if not paths:
         print(f"cpen: .pen 파일이 없습니다: {cwd}", file=sys.stderr)
         time.sleep(2)
-        return 1
+        return 0
     rows = pen_file_rows(paths, cwd)
     picked = choose("Pencil file", rows, delimiter=True)
     if not picked:
@@ -389,14 +416,14 @@ def launch_session() -> int:
         if tab_id:
             subprocess.run([herdr_bin(), "tab", "close", tab_id], capture_output=True)
         time.sleep(3)
-        return 1
+        return 0
 
 
 class PencilMCP:
-    def __init__(self) -> None:
+    def __init__(self, timeout: float = 20) -> None:
         path = str(pencil_socket_path())
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.socket.settimeout(20)
+        self.socket.settimeout(timeout)
         self.buffer = b""
         try:
             self.socket.connect(path)
